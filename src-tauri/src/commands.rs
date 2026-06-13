@@ -1,4 +1,4 @@
-use crate::model::{Lane, ReceiverConfig, Settings, TranscriptRow};
+use crate::model::{AlertHit, AlertRule, Bookmark, Lane, ReceiverConfig, Settings, TranscriptRow};
 use crate::orchestrator::Orchestrator;
 use tauri::State;
 
@@ -108,4 +108,70 @@ pub fn list_model_options() -> Vec<ModelInfo> {
 pub fn download_model(_name: String) -> Result<(), String> {
     // P1 stub: model download not implemented yet.
     Err("model download not implemented in P1; place a ggml model at ~/.hamhawk/models/ggml-base.bin or set its path in Settings".into())
+}
+
+// ---- audio monitor + recording ----
+
+#[tauri::command]
+pub fn set_monitor(orchestrator: State<'_, Orchestrator>, id: Option<String>) {
+    orchestrator.set_monitor(id);
+}
+
+#[tauri::command]
+pub fn start_recording(orchestrator: State<'_, Orchestrator>, id: String) {
+    orchestrator.start_recording(&id);
+}
+
+#[tauri::command]
+pub fn stop_recording(orchestrator: State<'_, Orchestrator>, id: String) {
+    orchestrator.stop_recording(&id);
+}
+
+#[tauri::command]
+pub fn recording_ids(orchestrator: State<'_, Orchestrator>) -> Vec<String> {
+    orchestrator.recording_ids()
+}
+
+#[tauri::command]
+pub fn running_ids(orchestrator: State<'_, Orchestrator>) -> Vec<String> {
+    orchestrator.running_ids()
+}
+
+// ---- bookmarks ----
+
+#[tauri::command]
+pub fn add_bookmark(orchestrator: State<'_, Orchestrator>, bookmark: Bookmark) -> Result<(), String> {
+    orchestrator.add_bookmark(bookmark)
+}
+
+#[tauri::command]
+pub fn list_bookmarks(orchestrator: State<'_, Orchestrator>) -> Result<Vec<Bookmark>, String> {
+    orchestrator.list_bookmarks()
+}
+
+#[tauri::command]
+pub fn remove_bookmark(orchestrator: State<'_, Orchestrator>, id: String) -> Result<(), String> {
+    orchestrator.remove_bookmark(&id)
+}
+
+// ---- alerts ----
+
+#[tauri::command]
+pub fn add_alert_rule(orchestrator: State<'_, Orchestrator>, rule: AlertRule) -> Result<(), String> {
+    orchestrator.add_alert_rule(rule)
+}
+
+#[tauri::command]
+pub fn list_alert_rules(orchestrator: State<'_, Orchestrator>) -> Result<Vec<AlertRule>, String> {
+    orchestrator.list_alert_rules()
+}
+
+#[tauri::command]
+pub fn remove_alert_rule(orchestrator: State<'_, Orchestrator>, id: String) -> Result<(), String> {
+    orchestrator.remove_alert_rule(&id)
+}
+
+#[tauri::command]
+pub fn list_alert_hits(orchestrator: State<'_, Orchestrator>, limit: i64) -> Result<Vec<AlertHit>, String> {
+    orchestrator.list_alert_hits(limit)
 }

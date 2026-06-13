@@ -19,7 +19,7 @@
 use super::{AudioFrame, SourceError, TelemetryFrame};
 use crate::model::{ReceiverConfig, SessionStatus};
 use futures::{SinkExt, StreamExt};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -79,9 +79,11 @@ impl OpenWebRX {
             .ok_or_else(|| SourceError("no receiver config".into()))?;
 
         let ws_url = format!("{}/ws/", self.ws_origin());
-        let (ws, _) = connect_async(&ws_url)
-            .await
-            .map_err(|e| SourceError(format!("ws connect failed: {e}")))?;
+        let ws = match tokio::time::timeout(Duration::from_secs(10), connect_async(&ws_url)).await {
+            Err(_) => return Err(SourceError("connect timed out".into())),
+            Ok(Err(e)) => return Err(SourceError(format!("ws connect failed: {e}"))),
+            Ok(Ok((ws, _))) => ws,
+        };
         let (mut write, mut read) = ws.split();
 
         // Handshake.

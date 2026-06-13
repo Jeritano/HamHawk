@@ -6,9 +6,7 @@ use tokio::sync::mpsc;
 use whisper_rs::{WhisperContext, WhisperContextParameters};
 
 pub struct AsrResult {
-    // Carried for a future shared cross-receiver pool; per-session consumers use
-    // the session id directly, so this is currently unread.
-    #[allow(dead_code)]
+    // Routes the result back to its receiver in the shared cross-receiver pool.
     pub receiver_id: String,
     pub ts_start: i64,
     pub ts_end: i64,

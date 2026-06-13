@@ -1,6 +1,7 @@
 pub mod adpcm;
 pub mod resample;
 pub mod segment;
+pub mod spectrum;
 pub mod vad;
 
 use crate::source::AudioFrame;

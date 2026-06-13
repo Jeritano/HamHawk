@@ -1,28 +1,31 @@
 use crate::asr::{self, AsrResult};
+use crate::audio::spectrum::Spectrogram;
 use crate::audio::{self, AsrJob};
 use crate::digital::cw::CwDecoder;
 use crate::digital::ft8::{Ft8Decoder, Ft8Mode};
 use crate::digital::psk_rtty::{PskRttyDecoder, PskRttyMode};
 use crate::digital::Decoder;
 use crate::events;
+use crate::model::SessionStatus;
 use crate::model::{
-    Lane, ReceiverConfig, ReceiverKind, Settings, TelemetryFrame as ModelTelemetry, TranscriptRow,
+    AlertHit, AlertRule, AudioChunk, Bookmark, Lane, ReceiverConfig, ReceiverKind, Settings,
+    SpectrumFrame, TelemetryFrame as ModelTelemetry, TranscriptRow,
 };
 use crate::source::kiwisdr::KiwiSDR;
 use crate::source::openwebrx::OpenWebRX;
 use crate::source::{AudioFrame, TelemetryFrame as SourceTelemetry};
-use crate::store::db::{models_dir, Db};
-use crate::model::SessionStatus;
-use std::collections::HashMap;
+use crate::store::db::{data_dir, models_dir, Db};
+use base64::Engine as _;
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::async_runtime::{spawn, JoinHandle};
 use tauri::AppHandle;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
-/// All tasks belonging to one running receiver session. Dropping/aborting these
-/// tears the whole pipeline down (the source task's senders close, cascading).
 struct Session {
     tasks: Vec<JoinHandle<()>>,
 }
@@ -35,19 +38,68 @@ impl Drop for Session {
     }
 }
 
+type Alerts = Arc<Mutex<Vec<AlertRule>>>;
+type Modes = Arc<Mutex<HashMap<String, String>>>;
+
+/// Max concurrent running receiver sessions (bounds WS connections + DSP load).
+const MAX_SESSIONS: usize = 8;
+
 pub struct Orchestrator {
     db: Arc<Db>,
     app: AppHandle,
     sessions: Mutex<HashMap<String, Session>>,
+    /// Which receiver's audio is streamed to the UI (one at a time).
+    monitored: Arc<Mutex<Option<String>>>,
+    /// Receiver ids currently being recorded to WAV.
+    record_ids: Arc<Mutex<HashSet<String>>>,
+    /// Cached, enabled alert rules (kept in sync with the DB).
+    alerts: Alerts,
+    /// Single shared ASR pool job sender (one Whisper model for ALL receivers).
+    /// `None` until first built; rebuilt after a settings change.
+    asr: Mutex<Option<mpsc::Sender<AsrJob>>>,
+    /// receiver_id -> mode, so the shared ASR result consumer can label transcripts.
+    modes: Modes,
 }
 
 impl Orchestrator {
     pub fn new(db: Db, app: AppHandle) -> Self {
+        let db = Arc::new(db);
+        let alerts = Arc::new(Mutex::new(load_alert_rules(&db)));
         Self {
-            db: Arc::new(db),
+            db,
             app,
             sessions: Mutex::new(HashMap::new()),
+            monitored: Arc::new(Mutex::new(None)),
+            record_ids: Arc::new(Mutex::new(HashSet::new())),
+            alerts,
+            asr: Mutex::new(None),
+            modes: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Get (building once) the shared ASR pool's job sender. One `WhisperContext`
+    /// is loaded for the whole app — not one per receiver. Returns `None` if no
+    /// model is available (transcription disabled).
+    fn ensure_asr(&self) -> Option<mpsc::Sender<AsrJob>> {
+        let mut guard = self.asr.lock().unwrap();
+        if let Some(tx) = guard.as_ref() {
+            return Some(tx.clone());
+        }
+        let model = self.resolve_model_path()?;
+        let workers = self.settings().asr_worker_count.clamp(1, 8);
+        let (job_tx, job_rx) = mpsc::channel::<AsrJob>(128);
+        let (res_tx, res_rx) = mpsc::channel::<AsrResult>(128);
+        spawn(asr::run_worker_pool(job_rx, res_tx, workers, model));
+        spawn(global_result_consumer(
+            res_rx,
+            self.db.clone(),
+            self.app.clone(),
+            self.alerts.clone(),
+            self.modes.clone(),
+        ));
+        *guard = Some(job_tx.clone());
+        log::info!("shared ASR pool started ({workers} workers, one shared model)");
+        Some(job_tx)
     }
 
     // ---- receiver CRUD ----
@@ -87,93 +139,90 @@ impl Orchestrator {
 
     pub fn start_receiver(&self, id: &str) -> Result<(), String> {
         let cfg = self.get_config(id)?;
-        
-        // For P2, we're expanding support to OpenWebRX and digital modes
         if !matches!(cfg.kind, ReceiverKind::Kiwisdr | ReceiverKind::Openwebrx) {
             return Err("only KiwiSDR and OpenWebRX are supported".into());
         }
-
-        // Clean restart if already running.
+        // Concurrency cap (restarting an already-running one is always allowed).
+        {
+            let sessions = self.sessions.lock().unwrap();
+            if !sessions.contains_key(id) && sessions.len() >= MAX_SESSIONS {
+                return Err(format!(
+                    "at the {MAX_SESSIONS}-receiver limit — stop one before starting another"
+                ));
+            }
+        }
         self.stop_receiver(id);
+        self.modes.lock().unwrap().insert(id.to_string(), cfg.mode.clone());
 
-        let (audio_tx, audio_rx) = mpsc::channel::<AudioFrame>(256);
+        // source -> tap -> lane
+        let (raw_tx, raw_rx) = mpsc::channel::<AudioFrame>(256);
+        let (pipe_tx, pipe_rx) = mpsc::channel::<AudioFrame>(256);
         let (telem_tx, telem_rx) = mpsc::channel::<SourceTelemetry>(64);
-        let (asr_tx, asr_rx) = mpsc::channel::<AsrJob>(64);
-        let (result_tx, result_rx) = mpsc::channel::<AsrResult>(64);
         let (digital_tx, digital_rx) = mpsc::channel::<Vec<crate::digital::DigitalMsg>>(64);
 
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
-        // 1. Source (connect + reconnect/backoff loop).
+        // 1. Source (connect + reconnect/backoff).
         {
             let app = self.app.clone();
             let cfg = cfg.clone();
             let id = id.to_string();
-            tasks.push(tokio::spawn(source_loop(cfg, id, app, audio_tx, telem_tx)));
+            tasks.push(spawn(source_loop(cfg, id, app, raw_tx, telem_tx)));
+        }
+
+        // 2. Tap: spectrum (waterfall) + monitored audio + recording, then forward.
+        {
+            let app = self.app.clone();
+            let id = id.to_string();
+            tasks.push(spawn(audio_tap(
+                id,
+                app,
+                raw_rx,
+                pipe_tx,
+                self.monitored.clone(),
+                self.record_ids.clone(),
+            )));
         }
 
         match cfg.lane {
             Lane::Voice => {
-                // Voice processing pipeline
-                // 2. Audio pipeline -> ASR jobs.
-                {
-                    let id = id.to_string();
-                    tasks.push(tokio::spawn(audio::audio_pipeline(id, audio_rx, asr_tx)));
-                }
-
-                // 3. ASR worker pool (or a drain if no model is available).
-                match self.resolve_model_path() {
-                    Some(model_path) => {
-                        let workers = self.settings().asr_worker_count.clamp(1, 8);
-                        tasks.push(tokio::spawn(asr::run_worker_pool(
-                            asr_rx, result_tx, workers, model_path,
-                        )));
-                    }
+                // Feed the ONE shared ASR pool. If no model, drain locally so the
+                // audio/waterfall pipeline never stalls.
+                let asr_tx = match self.ensure_asr() {
+                    Some(tx) => tx,
                     None => {
                         log::warn!("no whisper model found; transcription disabled (audio + telemetry still run)");
-                        drop(result_tx);
-                        tasks.push(tokio::spawn(async move {
-                            let mut asr_rx = asr_rx;
-                            while asr_rx.recv().await.is_some() {}
-                        }));
+                        let (tx, mut rx) = mpsc::channel::<AsrJob>(64);
+                        tasks.push(spawn(async move { while rx.recv().await.is_some() {} }));
+                        tx
                     }
-                }
-
-                // 4. ASR results -> DB + transcript events.
-                {
-                    let db = self.db.clone();
-                    let app = self.app.clone();
-                    let id = id.to_string();
-                    let mode = cfg.mode.clone();
-                    tasks.push(tokio::spawn(result_consumer(result_rx, db, app, id, mode)));
-                }
+                };
+                let id = id.to_string();
+                tasks.push(spawn(audio::audio_pipeline(id, pipe_rx, asr_tx)));
             }
             Lane::Digital => {
-                // Digital processing pipeline
-                // 2. Digital decoder -> DB + transcript events.
                 {
                     let db = self.db.clone();
                     let app = self.app.clone();
                     let id = id.to_string();
                     let mode = cfg.mode.clone();
-                    tasks.push(tokio::spawn(digital_consumer(digital_rx, db, app, id, mode)));
+                    let alerts = self.alerts.clone();
+                    tasks.push(spawn(digital_consumer(digital_rx, db, app, id, mode, alerts)));
                 }
-                
-                // 3. Audio to digital decoder
                 {
                     let id = id.to_string();
                     let mode = cfg.mode.clone();
-                    tasks.push(tokio::spawn(digital_pipeline(id, audio_rx, digital_tx, mode)));
+                    tasks.push(spawn(digital_pipeline(id, pipe_rx, digital_tx, mode)));
                 }
             }
         }
 
-        // 5. Telemetry -> throttled events + periodic DB snapshots.
+        // 3. Telemetry.
         {
             let db = self.db.clone();
             let app = self.app.clone();
             let id = id.to_string();
-            tasks.push(tokio::spawn(telemetry_consumer(telem_rx, db, app, id)));
+            tasks.push(spawn(telemetry_consumer(telem_rx, db, app, id)));
         }
 
         self.sessions
@@ -186,9 +235,30 @@ impl Orchestrator {
     pub fn stop_receiver(&self, id: &str) {
         let removed = self.sessions.lock().unwrap().remove(id);
         if removed.is_some() {
-            // Session's Drop aborts the tasks.
             events::emit_session(&self.app, id, SessionStatus::Stopped, None);
         }
+    }
+
+    pub fn running_ids(&self) -> Vec<String> {
+        self.sessions.lock().unwrap().keys().cloned().collect()
+    }
+
+    // ---- audio monitor + recording ----
+
+    pub fn set_monitor(&self, id: Option<String>) {
+        *self.monitored.lock().unwrap() = id;
+    }
+
+    pub fn start_recording(&self, id: &str) {
+        self.record_ids.lock().unwrap().insert(id.to_string());
+    }
+
+    pub fn stop_recording(&self, id: &str) {
+        self.record_ids.lock().unwrap().remove(id);
+    }
+
+    pub fn recording_ids(&self) -> Vec<String> {
+        self.record_ids.lock().unwrap().iter().cloned().collect()
     }
 
     // ---- transcripts ----
@@ -206,6 +276,80 @@ impl Orchestrator {
         Ok(rows.into_iter().map(row_to_transcript).collect())
     }
 
+    // ---- bookmarks ----
+
+    pub fn add_bookmark(&self, bm: Bookmark) -> Result<(), String> {
+        self.db
+            .add_bookmark(
+                &bm.id,
+                &bm.label,
+                kind_str(&bm.kind),
+                &bm.url,
+                bm.freq_hz,
+                &bm.mode,
+                lane_str(&bm.lane),
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn list_bookmarks(&self) -> Result<Vec<Bookmark>, String> {
+        let rows = self.db.list_bookmarks().map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, label, kind, url, freq_hz, mode, lane)| Bookmark {
+                id,
+                label,
+                kind: parse_kind(&kind),
+                url,
+                freq_hz,
+                mode,
+                lane: parse_lane(&lane),
+            })
+            .collect())
+    }
+
+    pub fn remove_bookmark(&self, id: &str) -> Result<(), String> {
+        self.db.remove_bookmark(id).map_err(|e| e.to_string())
+    }
+
+    // ---- alerts ----
+
+    pub fn add_alert_rule(&self, rule: AlertRule) -> Result<(), String> {
+        self.db
+            .add_alert_rule(&rule.id, &rule.name, &rule.pattern, rule.enabled)
+            .map_err(|e| e.to_string())?;
+        *self.alerts.lock().unwrap() = load_alert_rules(&self.db);
+        Ok(())
+    }
+
+    pub fn list_alert_rules(&self) -> Result<Vec<AlertRule>, String> {
+        let rows = self.db.list_alert_rules().map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, name, pattern, enabled)| AlertRule { id, name, pattern, enabled })
+            .collect())
+    }
+
+    pub fn remove_alert_rule(&self, id: &str) -> Result<(), String> {
+        self.db.remove_alert_rule(id).map_err(|e| e.to_string())?;
+        *self.alerts.lock().unwrap() = load_alert_rules(&self.db);
+        Ok(())
+    }
+
+    pub fn list_alert_hits(&self, limit: i64) -> Result<Vec<AlertHit>, String> {
+        let rows = self.db.list_alert_hits(limit).map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|(rule_id, rule_name, receiver_id, ts_ms, text)| AlertHit {
+                rule_id,
+                rule_name,
+                receiver_id,
+                ts_ms,
+                text,
+            })
+            .collect())
+    }
+
     // ---- settings ----
 
     pub fn settings(&self) -> Settings {
@@ -217,10 +361,7 @@ impl Orchestrator {
             .and_then(|s| s.parse().ok())
             .unwrap_or(2);
         let model_path = self.db.get_setting("whisper_model_path").ok().flatten();
-        Settings {
-            asr_worker_count: count,
-            whisper_model_path: model_path,
-        }
+        Settings { asr_worker_count: count, whisper_model_path: model_path }
     }
 
     pub fn set_settings(&self, settings: &Settings) -> Result<(), String> {
@@ -232,11 +373,12 @@ impl Orchestrator {
                 .set_setting("whisper_model_path", path)
                 .map_err(|e| e.to_string())?;
         }
+        // Drop the shared ASR pool so it rebuilds with the new model/worker count
+        // next time a voice receiver starts.
+        *self.asr.lock().unwrap() = None;
         Ok(())
     }
 
-    /// Resolve a usable Whisper model file: configured path first, then the
-    /// default `~/.hamhawk/models/ggml-base.bin`.
     fn resolve_model_path(&self) -> Option<String> {
         if let Some(p) = self.settings().whisper_model_path {
             if Path::new(&p).is_file() {
@@ -251,7 +393,15 @@ impl Orchestrator {
     }
 }
 
-// ---- background tasks (free functions; no &self borrow held across .await) ----
+fn load_alert_rules(db: &Arc<Db>) -> Vec<AlertRule> {
+    db.list_alert_rules()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, name, pattern, enabled)| AlertRule { id, name, pattern, enabled })
+        .collect()
+}
+
+// ---- background tasks ----
 
 async fn source_loop(
     cfg: ReceiverConfig,
@@ -265,31 +415,128 @@ async fn source_loop(
         events::emit_session(&app, &id, SessionStatus::Connecting, None);
         let result = match cfg.kind {
             ReceiverKind::Kiwisdr => {
-                let sdr = KiwiSDR::new(&cfg.url).with_config(cfg.clone());
-                sdr.run(audio_tx.clone(), telem_tx.clone(), &app, &id).await
+                KiwiSDR::new(&cfg.url)
+                    .with_config(cfg.clone())
+                    .run(audio_tx.clone(), telem_tx.clone(), &app, &id)
+                    .await
             }
             ReceiverKind::Openwebrx => {
-                let sdr = OpenWebRX::new(&cfg.url).with_config(cfg.clone());
-                sdr.run(audio_tx.clone(), telem_tx.clone(), &app, &id).await
+                OpenWebRX::new(&cfg.url)
+                    .with_config(cfg.clone())
+                    .run(audio_tx.clone(), telem_tx.clone(), &app, &id)
+                    .await
             }
         };
-        
         match result {
             Ok(()) => {
-                // Pipeline closed downstream: nothing more to do.
                 events::emit_session(&app, &id, SessionStatus::Stopped, None);
                 return;
             }
             Err(e) => {
-                events::emit_session(
-                    &app,
-                    &id,
-                    SessionStatus::Reconnecting,
-                    Some(e.to_string()),
-                );
+                events::emit_session(&app, &id, SessionStatus::Reconnecting, Some(e.to_string()));
                 tokio::time::sleep(Duration::from_secs(backoff)).await;
                 backoff = (backoff * 2).min(30);
             }
+        }
+    }
+}
+
+/// Tap between source and lane: emit waterfall rows, stream monitored audio,
+/// record to WAV, then forward the frame downstream.
+async fn audio_tap(
+    id: String,
+    app: AppHandle,
+    mut raw_rx: mpsc::Receiver<AudioFrame>,
+    pipe_tx: mpsc::Sender<AudioFrame>,
+    monitored: Arc<Mutex<Option<String>>>,
+    record_ids: Arc<Mutex<HashSet<String>>>,
+) {
+    let mut sg = Spectrogram::new(1024, 128);
+    let mut writer: Option<hound::WavWriter<BufWriter<File>>> = None;
+
+    while let Some(frame) = raw_rx.recv().await {
+        if let Some(bins) = sg.push(&frame.samples) {
+            events::emit_spectrum(&app, SpectrumFrame { receiver_id: id.clone(), bins });
+        }
+
+        if monitored.lock().unwrap().as_deref() == Some(id.as_str()) {
+            let bytes: Vec<u8> = frame
+                .samples
+                .iter()
+                .flat_map(|&s| ((s * 32767.0).clamp(-32768.0, 32767.0) as i16).to_le_bytes())
+                .collect();
+            let pcm_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            events::emit_audio(
+                &app,
+                AudioChunk { receiver_id: id.clone(), sample_rate: frame.sample_rate, pcm_b64 },
+            );
+        }
+
+        let want_record = record_ids.lock().unwrap().contains(&id);
+        if want_record {
+            if writer.is_none() {
+                writer = open_wav(&id, frame.sample_rate);
+            }
+            if let Some(w) = writer.as_mut() {
+                for &s in &frame.samples {
+                    let _ = w.write_sample((s * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                }
+            }
+        } else if let Some(w) = writer.take() {
+            let _ = w.finalize();
+        }
+
+        if pipe_tx.send(frame).await.is_err() {
+            break;
+        }
+    }
+    if let Some(w) = writer.take() {
+        let _ = w.finalize();
+    }
+}
+
+fn open_wav(id: &str, sample_rate: u32) -> Option<hound::WavWriter<BufWriter<File>>> {
+    let dir = data_dir().join("recordings");
+    std::fs::create_dir_all(&dir).ok()?;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("{id}-{ts}.wav"));
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    match hound::WavWriter::create(&path, spec) {
+        Ok(w) => {
+            log::info!("recording {id} -> {}", path.display());
+            Some(w)
+        }
+        Err(e) => {
+            log::error!("failed to open recording: {e}");
+            None
+        }
+    }
+}
+
+fn check_alerts(text: &str, id: &str, ts: i64, alerts: &Alerts, db: &Arc<Db>, app: &AppHandle) {
+    let lc = text.to_lowercase();
+    let rules = alerts.lock().unwrap().clone();
+    for r in rules.iter().filter(|r| r.enabled && !r.pattern.is_empty()) {
+        if lc.contains(&r.pattern.to_lowercase()) {
+            let _ = db.insert_alert_hit(&r.id, &r.name, id, ts, text);
+            events::emit_alert(
+                app,
+                AlertHit {
+                    rule_id: r.id.clone(),
+                    rule_name: r.name.clone(),
+                    receiver_id: id.to_string(),
+                    ts_ms: ts,
+                    text: text.to_string(),
+                },
+            );
         }
     }
 }
@@ -300,23 +547,19 @@ async fn digital_pipeline(
     digital_tx: mpsc::Sender<Vec<crate::digital::DigitalMsg>>,
     mode: String,
 ) {
-    // Create appropriate decoder based on mode
     let mut decoder: Box<dyn Decoder> = match mode.as_str() {
         "ft8" => Box::new(Ft8Decoder::new(Ft8Mode::Ft8, 12000)),
         "ft4" => Box::new(Ft8Decoder::new(Ft8Mode::Ft4, 12000)),
         "cw" => Box::new(CwDecoder::new(12000)),
         "psk31" => Box::new(PskRttyDecoder::new(PskRttyMode::Psk31, 12000)),
         "rtty" => Box::new(PskRttyDecoder::new(PskRttyMode::Rtty, 12000)),
-        _ => {
-            // Default to CW decoder for unknown modes
-            Box::new(CwDecoder::new(12000))
-        }
+        _ => Box::new(CwDecoder::new(12000)),
     };
 
     while let Some(frame) = audio_rx.recv().await {
         let messages = decoder.push(&frame);
         if !messages.is_empty() && digital_tx.send(messages).await.is_err() {
-            return; // Consumer gone
+            return;
         }
     }
 }
@@ -327,31 +570,24 @@ async fn digital_consumer(
     app: AppHandle,
     id: String,
     mode: String,
+    alerts: Alerts,
 ) {
     while let Some(msgs) = rx.recv().await {
         for msg in msgs {
             let new_id = db
                 .insert_transcript(
-                    &id,
-                    msg.ts_ms,
-                    msg.ts_ms + 1000, // Approximate end time
-                    "digital",
-                    &mode,
-                    None, // No source language for digital modes
-                    &msg.text,
-                    None,
-                    None, // No confidence for digital modes
+                    &id, msg.ts_ms, msg.ts_ms, "digital", &mode, None, &msg.text, None, None,
                     msg.snr_db,
                 )
                 .unwrap_or(0);
-
+            check_alerts(&msg.text, &id, msg.ts_ms, &alerts, &db, &app);
             events::emit_transcript(
                 &app,
                 TranscriptRow {
                     id: new_id,
                     receiver_id: id.clone(),
                     ts_start: msg.ts_ms,
-                    ts_end: msg.ts_ms + 1000,
+                    ts_end: msg.ts_ms,
                     lane: Lane::Digital,
                     mode: mode.clone(),
                     src_lang: None,
@@ -365,41 +601,37 @@ async fn digital_consumer(
     }
 }
 
-async fn result_consumer(
+/// Single consumer for the shared ASR pool: routes each result to its receiver
+/// (by id) and labels it with that receiver's mode.
+async fn global_result_consumer(
     mut rx: mpsc::Receiver<AsrResult>,
     db: Arc<Db>,
     app: AppHandle,
-    id: String,
-    mode: String,
+    alerts: Alerts,
+    modes: Modes,
 ) {
     while let Some(r) = rx.recv().await {
         if r.text_en.is_empty() {
             continue;
         }
+        let id = r.receiver_id.clone();
+        let mode = modes.lock().unwrap().get(&id).cloned().unwrap_or_default();
         let new_id = db
             .insert_transcript(
-                &id,
-                r.ts_start,
-                r.ts_end,
-                "voice",
-                &mode,
-                r.src_lang.as_deref(),
-                &r.text_en,
-                None,
-                r.confidence,
-                None,
+                &id, r.ts_start, r.ts_end, "voice", &mode, r.src_lang.as_deref(), &r.text_en, None,
+                r.confidence, None,
             )
             .unwrap_or(0);
-
+        check_alerts(&r.text_en, &id, r.ts_start, &alerts, &db, &app);
         events::emit_transcript(
             &app,
             TranscriptRow {
                 id: new_id,
-                receiver_id: id.clone(),
+                receiver_id: id,
                 ts_start: r.ts_start,
                 ts_end: r.ts_end,
                 lane: Lane::Voice,
-                mode: mode.clone(),
+                mode,
                 src_lang: r.src_lang,
                 text_en: r.text_en,
                 text_native: None,
@@ -420,7 +652,6 @@ async fn telemetry_consumer(
     let mut last_db = Instant::now() - Duration::from_secs(10);
     while let Some(t) = rx.recv().await {
         let now = Instant::now();
-        // Emit to UI at <= 4 Hz.
         if now.duration_since(last_emit) >= Duration::from_millis(250) {
             last_emit = now;
             events::emit_telemetry(
@@ -434,7 +665,6 @@ async fn telemetry_consumer(
                 },
             );
         }
-        // Persist a snapshot every ~5 s.
         if now.duration_since(last_db) >= Duration::from_secs(5) {
             last_db = now;
             let ts = SystemTime::now()
@@ -446,7 +676,7 @@ async fn telemetry_consumer(
     }
 }
 
-// ---- row <-> model mapping helpers ----
+// ---- row <-> model mapping ----
 
 fn kind_str(k: &ReceiverKind) -> &'static str {
     match k {

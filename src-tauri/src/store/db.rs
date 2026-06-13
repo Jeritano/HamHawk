@@ -218,6 +218,116 @@ impl Db {
         )?;
         Ok(())
     }
+
+    // ---- bookmarks ----
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_bookmark(
+        &self,
+        id: &str,
+        label: &str,
+        kind: &str,
+        url: &str,
+        freq_hz: u64,
+        mode: &str,
+        lane: &str,
+    ) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO bookmark (id,label,kind,url,freq_hz,mode,lane,created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![id, label, kind, url, freq_hz, mode, lane, chrono::Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn list_bookmarks(
+        &self,
+    ) -> SqlResult<Vec<(String, String, String, String, u64, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id,label,kind,url,freq_hz,mode,lane FROM bookmark ORDER BY label",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn remove_bookmark(&self, id: &str) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM bookmark WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    // ---- alert rules + hits ----
+
+    pub fn add_alert_rule(&self, id: &str, name: &str, pattern: &str, enabled: bool) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO alert_rule (id,name,pattern,enabled) VALUES (?1,?2,?3,?4)",
+            params![id, name, pattern, enabled as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_alert_rules(&self) -> SqlResult<Vec<(String, String, String, bool)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id,name,pattern,enabled FROM alert_rule ORDER BY name")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0))
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn remove_alert_rule(&self, id: &str) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM alert_rule WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn insert_alert_hit(
+        &self,
+        rule_id: &str,
+        rule_name: &str,
+        receiver_id: &str,
+        ts_ms: i64,
+        text: &str,
+    ) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO alert_hit (rule_id,rule_name,receiver_id,ts_ms,text) VALUES (?1,?2,?3,?4,?5)",
+            params![rule_id, rule_name, receiver_id, ts_ms, text],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn list_alert_hits(&self, limit: i64) -> SqlResult<Vec<(String, String, String, i64, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT rule_id,rule_name,receiver_id,ts_ms,text FROM alert_hit ORDER BY ts_ms DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(rows)
+    }
 }
 
 /// Turn a free-text query into a safe FTS5 MATCH expression: each whitespace

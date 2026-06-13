@@ -35,6 +35,18 @@ fn main() {
             commands::set_settings,
             commands::list_model_options,
             commands::download_model,
+            commands::set_monitor,
+            commands::start_recording,
+            commands::stop_recording,
+            commands::recording_ids,
+            commands::running_ids,
+            commands::add_bookmark,
+            commands::list_bookmarks,
+            commands::remove_bookmark,
+            commands::add_alert_rule,
+            commands::list_alert_rules,
+            commands::remove_alert_rule,
+            commands::list_alert_hits,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

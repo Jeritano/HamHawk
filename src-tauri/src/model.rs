@@ -53,3 +53,49 @@ pub struct Settings {
     pub asr_worker_count: u32,
     pub whisper_model_path: Option<String>,
 }
+
+/// One waterfall/spectrum row (log-magnitude bins, 0..255), pushed per receiver.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpectrumFrame {
+    pub receiver_id: String,
+    pub bins: Vec<u8>,
+}
+
+/// A chunk of monitored audio (base64 of little-endian i16 PCM).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioChunk {
+    pub receiver_id: String,
+    pub sample_rate: u32,
+    pub pcm_b64: String,
+}
+
+/// A saved frequency/receiver preset.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub id: String,
+    pub label: String,
+    pub kind: ReceiverKind,
+    pub url: String,
+    pub freq_hz: u64,
+    pub mode: String,
+    pub lane: Lane,
+}
+
+/// A keyword/regex-ish alert rule (substring, case-insensitive).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlertRule {
+    pub id: String,
+    pub name: String,
+    pub pattern: String,
+    pub enabled: bool,
+}
+
+/// An alert that fired (a transcript/decode matched a rule).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlertHit {
+    pub rule_id: String,
+    pub rule_name: String,
+    pub receiver_id: String,
+    pub ts_ms: i64,
+    pub text: String,
+}

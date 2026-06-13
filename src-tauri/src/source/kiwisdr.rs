@@ -69,6 +69,23 @@ impl KiwiSDR {
         app: &AppHandle,
         id: &str,
     ) -> Result<(), SourceError> {
+        let app = app.clone();
+        let id = id.to_string();
+        self.stream(audio_tx, telem_tx, move || {
+            crate::events::emit_session(&app, &id, SessionStatus::Live, None)
+        })
+        .await
+    }
+
+    /// Core connect + stream loop, decoupled from the UI. `on_live` is invoked once
+    /// the connection is configured and audio is expected (so tests can run it
+    /// without an AppHandle).
+    pub async fn stream(
+        self,
+        audio_tx: mpsc::Sender<AudioFrame>,
+        telem_tx: mpsc::Sender<TelemetryFrame>,
+        mut on_live: impl FnMut() + Send,
+    ) -> Result<(), SourceError> {
         let cfg = self
             .config
             .as_ref()
@@ -80,9 +97,12 @@ impl KiwiSDR {
             .unwrap_or(0);
         let ws_url = format!("{}/{}/SND", self.ws_origin(), ts);
 
-        let (ws, _) = connect_async(&ws_url)
-            .await
-            .map_err(|e| SourceError(format!("ws connect failed: {e}")))?;
+        // Fail fast instead of hanging on an unreachable/slow node.
+        let ws = match tokio::time::timeout(Duration::from_secs(10), connect_async(&ws_url)).await {
+            Err(_) => return Err(SourceError("connect timed out".into())),
+            Ok(Err(e)) => return Err(SourceError(format!("ws connect failed: {e}"))),
+            Ok(Ok((ws, _))) => ws,
+        };
         let (mut write, mut read) = ws.split();
 
         // --- handshake / configuration ---
@@ -108,73 +128,67 @@ impl KiwiSDR {
                 .map_err(|e| SourceError(format!("config send failed: {e}")))?;
         }
 
-        // Keepalive: KiwiSDR drops idle clients.
-        let keepalive = tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                tick.tick().await;
-                if write
-                    .send(Message::Text(String::from("SET keepalive")))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
+        on_live();
 
-        crate::events::emit_session(app, id, SessionStatus::Live, None);
-
+        // Keepalive is interleaved into the read loop (not a detached task) so a
+        // session abort tears down both read + write halves immediately — no
+        // leaked keepalive task or half-open connection on stop/switch.
         let mut adpcm = ImaAdpcm::new();
+        let mut keepalive = tokio::time::interval(Duration::from_secs(5));
         let result = loop {
-            match read.next().await {
-                Some(Ok(Message::Binary(buf))) => {
-                    if buf.len() < 3 {
-                        continue;
+            tokio::select! {
+                _ = keepalive.tick() => {
+                    if write.send(Message::Text(String::from("SET keepalive"))).await.is_err() {
+                        break Err(SourceError("connection closed".into()));
                     }
-                    let tag = &buf[0..3];
-                    if tag == b"SND" {
-                        if buf.len() < 10 {
+                }
+                msg = read.next() => match msg {
+                    Some(Ok(Message::Binary(buf))) => {
+                        if buf.len() < 3 {
                             continue;
                         }
-                        let smeter = u16::from_be_bytes([buf[8], buf[9]]);
-                        let rssi = 0.1 * ((smeter & 0x0FFF) as f32) - 127.0;
-                        let _ = telem_tx.try_send(TelemetryFrame {
-                            s_meter_dbm: Some(rssi),
-                            snr_db: None,
-                        });
+                        let tag = &buf[0..3];
+                        if tag == b"SND" {
+                            if buf.len() < 10 {
+                                continue;
+                            }
+                            let smeter = u16::from_be_bytes([buf[8], buf[9]]);
+                            let rssi = 0.1 * ((smeter & 0x0FFF) as f32) - 127.0;
+                            let _ = telem_tx.try_send(TelemetryFrame {
+                                s_meter_dbm: Some(rssi),
+                                snr_db: None,
+                            });
 
-                        let pcm = adpcm.decode(&buf[10..]);
-                        let ts_ms = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map(|d| d.as_millis() as i64)
-                            .unwrap_or(0);
-                        if audio_tx
-                            .send(AudioFrame { samples: pcm, sample_rate: AUDIO_RATE, ts_ms })
-                            .await
-                            .is_err()
-                        {
-                            break Ok(()); // pipeline gone
-                        }
-                    } else if tag == b"MSG" {
-                        let text = String::from_utf8_lossy(&buf[3..]);
-                        if text.contains("badp=1") {
-                            break Err(SourceError("authentication rejected".into()));
-                        }
-                        if text.contains("too_busy") {
-                            break Err(SourceError("server full (too_busy)".into()));
+                            let pcm = adpcm.decode(&buf[10..]);
+                            let ts_ms = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+                            if audio_tx
+                                .send(AudioFrame { samples: pcm, sample_rate: AUDIO_RATE, ts_ms })
+                                .await
+                                .is_err()
+                            {
+                                break Ok(()); // pipeline gone
+                            }
+                        } else if tag == b"MSG" {
+                            let text = String::from_utf8_lossy(&buf[3..]);
+                            if text.contains("badp=1") {
+                                break Err(SourceError("authentication rejected".into()));
+                            }
+                            if text.contains("too_busy") {
+                                break Err(SourceError("server full (too_busy)".into()));
+                            }
                         }
                     }
-                    // other tags (waterfall "W/F", "STA", etc.) ignored in P1
+                    Some(Ok(Message::Close(_))) => break Err(SourceError("connection closed".into())),
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => break Err(SourceError(format!("ws error: {e}"))),
+                    None => break Err(SourceError("connection closed".into())),
                 }
-                Some(Ok(Message::Close(_))) => break Err(SourceError("connection closed".into())),
-                Some(Ok(_)) => continue, // ping/pong/text we don't use
-                Some(Err(e)) => break Err(SourceError(format!("ws error: {e}"))),
-                None => break Err(SourceError("connection closed".into())),
             }
         };
 
-        keepalive.abort();
         result
     }
 }
@@ -182,3 +196,50 @@ impl KiwiSDR {
 // Silence unused-type warnings for the WS stream alias on some platforms.
 #[allow(dead_code)]
 type KiwiWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use crate::model::{Lane, ReceiverConfig, ReceiverKind};
+
+    // Connects to a real public KiwiSDR and verifies audio frames actually arrive.
+    // Ignored by default (network + hits someone's RX); run manually:
+    //   cargo test live_kiwi_audio -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "hits a live public KiwiSDR"]
+    async fn live_kiwi_audio() {
+        let cfg = ReceiverConfig {
+            id: "t".into(),
+            kind: ReceiverKind::Kiwisdr,
+            url: "http://kphsdr.com:8073".into(),
+            label: None,
+            freq_hz: 10_000_000,
+            mode: "am".into(),
+            lane: Lane::Voice,
+            enabled: true,
+        };
+        let (atx, mut arx) = mpsc::channel::<AudioFrame>(256);
+        let (ttx, _trx) = mpsc::channel::<TelemetryFrame>(64);
+        let sdr = KiwiSDR::new(&cfg.url).with_config(cfg);
+        let stream = sdr.stream(atx, ttx, || println!("LIVE: configured, audio expected"));
+        tokio::pin!(stream);
+
+        let mut frames = 0usize;
+        let mut samples = 0usize;
+        let res = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                tokio::select! {
+                    r = &mut stream => return format!("stream ended early: {r:?}"),
+                    f = arx.recv() => match f {
+                        Some(fr) => { frames += 1; samples += fr.samples.len();
+                            if frames >= 20 { return "ok".into(); } }
+                        None => return "channel closed".into(),
+                    }
+                }
+            }
+        }).await;
+
+        println!("LIVE result: {res:?}  frames={frames} samples={samples}");
+        assert!(frames > 0, "no audio frames from live KiwiSDR ({res:?})");
+    }
+}

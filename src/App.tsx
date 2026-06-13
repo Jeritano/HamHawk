@@ -1,62 +1,60 @@
-import { useEffect } from 'react';
-import { ReceiverList } from './components/ReceiverList';
-import { TranscriptPanel } from './components/TranscriptPanel';
-import { TelemetryDisplay } from './components/TelemetryDisplay';
-import { SettingsPanel } from './components/SettingsPanel';
-import { useStore } from './state/store';
+import { useEffect } from "react";
+import { useStore } from "./state/store";
+import { Rig } from "./components/Rig";
+import { CommandPalette } from "./components/CommandPalette";
+import { SettingsModal } from "./components/SettingsModal";
+import { AddReceiverModal } from "./components/AddReceiverModal";
 
 export default function App() {
-  const activeTab = useStore((s) => s.activeTab);
-  const setActiveTab = useStore((s) => s.setActiveTab);
+  const setPaletteOpen = useStore((s) => s.setPaletteOpen);
+  const loadAll = useStore((s) => s.loadAll);
   const initListeners = useStore((s) => s.initListeners);
+  const error = useStore((s) => s.error);
 
   useEffect(() => {
+    loadAll();
     const un = initListeners();
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
     return () => {
+      window.removeEventListener("keydown", onKey);
       un.then((f) => f());
     };
-  }, [initListeners]);
+  }, [loadAll, initListeners, setPaletteOpen]);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
-      {/* Header */}
-      <header style={{
-        background: '#16213e',
-        padding: '12px 24px',
-        borderBottom: '1px solid #0f3460',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-      }}>
-        <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#e94560' }}>HamHawk</h1>
-        <nav style={{ display: 'flex', gap: '8px' }}>
-          {['receivers', 'transcripts', 'telemetry', 'settings'].map(tab => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              style={{
-                padding: '6px 16px',
-                background: activeTab === tab ? '#e94560' : 'transparent',
-                color: activeTab === tab ? '#fff' : '#aaa',
-                border: '1px solid #0f3460',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                textTransform: 'capitalize',
-              }}
-            >
-              {tab}
-            </button>
-          ))}
-        </nav>
-      </header>
+    <>
+      <Rig />
+      {error && <div className="err-banner">{error}</div>}
+      <CommandPalette />
+      <SettingsModal />
+      <AddReceiverModal />
+      <Toasts />
+    </>
+  );
+}
 
-      {/* Main content */}
-      <main style={{ flex: 1, overflow: 'auto', padding: '24px' }}>
-        {activeTab === 'receivers' && <ReceiverList />}
-        {activeTab === 'transcripts' && <TranscriptPanel />}
-        {activeTab === 'telemetry' && <TelemetryDisplay />}
-        {activeTab === 'settings' && <SettingsPanel />}
-      </main>
+function Toasts() {
+  const toasts = useStore((s) => s.toasts);
+  const dismiss = useStore((s) => s.dismissToast);
+  useEffect(() => {
+    const timers = toasts.map((t) => setTimeout(() => dismiss(t.key), 6000));
+    return () => timers.forEach(clearTimeout);
+  }, [toasts, dismiss]);
+  if (toasts.length === 0) return null;
+  return (
+    <div className="toast-wrap">
+      {toasts.map((t) => (
+        <div className="toast" key={t.key} onClick={() => dismiss(t.key)}>
+          <div className="rn">⚠ {t.ruleName}</div>
+          <div>{t.text}</div>
+        </div>
+      ))}
     </div>
   );
 }
