@@ -1,0 +1,27 @@
+# Rust / Cargo build output
+/target
+**/target
+
+# Node / Vite
+node_modules
+dist
+dist-ssr
+*.local
+
+# Tauri generated
+src-tauri/gen
+
+# Whisper models (downloaded at runtime, large; live in ~/.hamhawk)
+*.bin
+*.ggml
+models/
+
+# Local runtime data — never commit
+*.sqlite
+*.sqlite-*
+
+# OS / editor
+.DS_Store
+*.swp
+.idea
+.vscode
