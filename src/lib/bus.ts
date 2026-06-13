@@ -26,3 +26,6 @@ export const spectrumBus = new Bus<number[]>();
 
 /** S-meter / telemetry keyed by receiver id (high-frequency; bypasses the store). */
 export const telemetryBus = new Bus<{ s_meter_dbm?: number; snr_db?: number; status: string }>();
+
+/** Latest s-meter dBm per receiver id (snapshot for the scanner's squelch check). */
+export const lastDbm = new Map<string, number>();

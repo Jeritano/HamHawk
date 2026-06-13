@@ -60,6 +60,11 @@ pub fn stop_receiver(orchestrator: State<'_, Orchestrator>, id: String) -> Resul
 }
 
 #[tauri::command]
+pub fn tune(orchestrator: State<'_, Orchestrator>, id: String, freq_hz: u64) -> Result<(), String> {
+    orchestrator.tune(&id, freq_hz)
+}
+
+#[tauri::command]
 pub fn query_transcripts(
     orchestrator: State<'_, Orchestrator>,
     receiver_id: Option<String>,

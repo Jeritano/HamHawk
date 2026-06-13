@@ -28,6 +28,8 @@ use tokio::sync::mpsc;
 
 struct Session {
     tasks: Vec<JoinHandle<()>>,
+    /// Live retune channel into the running source (no reconnect).
+    tune_tx: mpsc::Sender<u64>,
 }
 
 impl Drop for Session {
@@ -159,15 +161,17 @@ impl Orchestrator {
         let (pipe_tx, pipe_rx) = mpsc::channel::<AudioFrame>(256);
         let (telem_tx, telem_rx) = mpsc::channel::<SourceTelemetry>(64);
         let (digital_tx, digital_rx) = mpsc::channel::<Vec<crate::digital::DigitalMsg>>(64);
+        let (tune_tx, tune_rx) = mpsc::channel::<u64>(8);
 
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
-        // 1. Source (connect + reconnect/backoff).
+        // 1. Source (connect + reconnect/backoff + live retune).
         {
             let app = self.app.clone();
             let cfg = cfg.clone();
             let id = id.to_string();
-            tasks.push(spawn(source_loop(cfg, id, app, raw_tx, telem_tx)));
+            let db = self.db.clone();
+            tasks.push(spawn(source_loop(cfg, id, app, raw_tx, telem_tx, tune_rx, db)));
         }
 
         // 2. Tap: spectrum (waterfall) + monitored audio + recording, then forward.
@@ -228,7 +232,19 @@ impl Orchestrator {
         self.sessions
             .lock()
             .unwrap()
-            .insert(id.to_string(), Session { tasks });
+            .insert(id.to_string(), Session { tasks, tune_tx });
+        Ok(())
+    }
+
+    /// Re-tune a receiver. Persists the freq and, if running, applies it live on
+    /// the open socket (no reconnect) via the session's tune channel.
+    pub fn tune(&self, id: &str, freq_hz: u64) -> Result<(), String> {
+        self.db
+            .update_receiver_freq(id, freq_hz)
+            .map_err(|e| e.to_string())?;
+        if let Some(sess) = self.sessions.lock().unwrap().get(id) {
+            let _ = sess.tune_tx.try_send(freq_hz); // best-effort live retune
+        }
         Ok(())
     }
 
@@ -404,26 +420,39 @@ fn load_alert_rules(db: &Arc<Db>) -> Vec<AlertRule> {
 // ---- background tasks ----
 
 async fn source_loop(
-    cfg: ReceiverConfig,
+    mut cfg: ReceiverConfig,
     id: String,
     app: AppHandle,
     audio_tx: mpsc::Sender<AudioFrame>,
     telem_tx: mpsc::Sender<SourceTelemetry>,
+    mut tune_rx: mpsc::Receiver<u64>,
+    db: Arc<Db>,
 ) {
     let mut backoff = 1u64;
     loop {
+        // Pick up any retune that happened while disconnected so reconnects use it.
+        if let Some(f) = db.get_receiver_freq(&id) {
+            cfg.freq_hz = f;
+        }
         events::emit_session(&app, &id, SessionStatus::Connecting, None);
         let result = match cfg.kind {
             ReceiverKind::Kiwisdr => {
+                let app2 = app.clone();
+                let id2 = id.clone();
                 KiwiSDR::new(&cfg.url)
                     .with_config(cfg.clone())
-                    .run(audio_tx.clone(), telem_tx.clone(), &app, &id)
+                    .stream(
+                        audio_tx.clone(),
+                        telem_tx.clone(),
+                        move || events::emit_session(&app2, &id2, SessionStatus::Live, None),
+                        &mut tune_rx,
+                    )
                     .await
             }
             ReceiverKind::Openwebrx => {
                 OpenWebRX::new(&cfg.url)
                     .with_config(cfg.clone())
-                    .run(audio_tx.clone(), telem_tx.clone(), &app, &id)
+                    .run(audio_tx.clone(), telem_tx.clone(), &app, &id, &mut tune_rx)
                     .await
             }
         };

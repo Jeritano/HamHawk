@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore, type ReceiverConfig } from "../state/store";
 import { Waterfall } from "./Waterfall";
 import { SpectrumTrace } from "./SpectrumTrace";
@@ -23,7 +23,6 @@ export function Rig() {
   const sessionStatus = useStore((s) => s.sessionStatus);
   const monitoredId = useStore((s) => s.monitoredId);
   const recordingIds = useStore((s) => s.recordingIds);
-  const setActive = useStore((s) => s.setActive);
   const startReceiver = useStore((s) => s.startReceiver);
   const stopReceiver = useStore((s) => s.stopReceiver);
   const setMonitor = useStore((s) => s.setMonitor);
@@ -31,10 +30,21 @@ export function Rig() {
   const setAddOpen = useStore((s) => s.setAddOpen);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const setPaletteOpen = useStore((s) => s.setPaletteOpen);
+  const tune = useStore((s) => s.tune);
+  const scanning = useStore((s) => s.scanning);
+  const startScan = useStore((s) => s.startScan);
+  const stopScan = useStore((s) => s.stopScan);
+  const squelch = useStore((s) => s.squelch);
+  const setSquelch = useStore((s) => s.setSquelch);
 
   const [view, setView] = useState<LcdView>("scope");
   const [vol, setVol] = useState(audioPlayer.getVolume());
   const [clock, setClock] = useState("");
+  const STEPS = [10, 100, 1000, 5000];
+  const [stepIdx, setStepIdx] = useState(1); // default 100 Hz
+  const step = STEPS[stepIdx];
+  const [angle, setAngle] = useState(0);
+  const dragY = useRef<number | null>(null);
 
   useEffect(() => {
     const tick = () => {
@@ -53,6 +63,13 @@ export function Rig() {
   const mainStatus = main ? sessionStatus[main.id] ?? "stopped" : "stopped";
   const listening = main ? monitoredId === main.id : false;
   const recording = main ? recordingIds.includes(main.id) : false;
+
+  const stepLabel = step < 1000 ? `${step} Hz` : `${step / 1000} kHz`;
+  const bump = (steps: number) => {
+    if (!main || steps === 0) return;
+    tune(main.id, main.freq_hz + steps * step);
+    setAngle((a) => a + steps * 8);
+  };
 
   return (
     <div className="rig">
@@ -107,6 +124,18 @@ export function Rig() {
             <div className="led" />
             <div className="k">{mainStatus === "stopped" ? "START" : "STOP"}</div>
             <div className="v">rx</div>
+          </button>
+          <button
+            className={"rigbtn warn" + (scanning ? " on" : "")}
+            disabled={!main}
+            onClick={() => {
+              if (!main) return;
+              scanning ? stopScan() : startScan(main.id);
+            }}
+          >
+            <div className="led" />
+            <div className="k">{scanning ? "SCANNING" : "SCAN"}</div>
+            <div className="v">squelch</div>
           </button>
           <button className="rigbtn" onClick={() => setAddOpen(true)}>
             <div className="led" />
@@ -174,20 +203,40 @@ export function Rig() {
         {/* RIGHT COLUMN — knobs */}
         <div className="col right" style={{ alignItems: "center" }}>
           <div className="knobwrap">
-            <div className="knob small" title="Multi" />
-            <div className="knob-label">MULTI</div>
+            <div
+              className="knob small"
+              title="Multi — click to change tuning step"
+              onClick={() => setStepIdx((i) => (i + 1) % STEPS.length)}
+            />
+            <div className="knob-label">MULTI · STEP</div>
+            <div className="knob-label" style={{ color: "var(--teal)" }}>{stepLabel}</div>
           </div>
           <div className="knobwrap" style={{ marginTop: 6 }}>
             <div
               className="knob tune"
-              title="Tuning — click to step to the next VFO"
-              onClick={() => {
-                if (!receivers.length) return;
-                const i = Math.max(0, receivers.findIndex((r) => r.id === activeId));
-                setActive(receivers[(i + 1) % receivers.length].id);
+              style={{ transform: `rotate(${angle}deg)`, cursor: "ns-resize", touchAction: "none" }}
+              title="Tuning — drag up/down or scroll to change frequency"
+              onWheel={(e) => bump(e.deltaY > 0 ? -1 : 1)}
+              onPointerDown={(e) => {
+                dragY.current = e.clientY;
+                (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
               }}
+              onPointerMove={(e) => {
+                if (dragY.current == null) return;
+                const dy = dragY.current - e.clientY; // up = increase
+                const steps = Math.trunc(dy / 4);
+                if (steps !== 0) {
+                  bump(steps);
+                  dragY.current = e.clientY;
+                }
+              }}
+              onPointerUp={() => (dragY.current = null)}
+              onPointerCancel={() => (dragY.current = null)}
             />
             <div className="knob-label">MAIN TUNING</div>
+            <div className="knob-label" style={{ color: "var(--teal)" }}>
+              {main ? formatFreq(main.freq_hz) : "—"}
+            </div>
           </div>
           <div className="vol" style={{ marginTop: 10 }}>
             <div className="knob-label" style={{ textAlign: "center", marginBottom: 4 }}>
@@ -205,6 +254,20 @@ export function Rig() {
                 setVol(v);
                 audioPlayer.setVolume(v);
               }}
+            />
+          </div>
+          <div className="vol" style={{ marginTop: 12 }}>
+            <div className="knob-label" style={{ textAlign: "center", marginBottom: 4 }}>
+              SQUELCH <span style={{ color: "var(--teal)" }}>{squelch} dBm</span>
+            </div>
+            <input
+              className="slider"
+              type="range"
+              min={-120}
+              max={-40}
+              step={1}
+              value={squelch}
+              onChange={(e) => setSquelch(Number(e.target.value))}
             />
           </div>
         </div>

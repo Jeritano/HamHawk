@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { spectrumBus, telemetryBus } from "../lib/bus";
+import { spectrumBus, telemetryBus, lastDbm } from "../lib/bus";
 import { audioPlayer } from "../lib/audioPlayer";
 
 export type Kind = "kiwisdr" | "openwebrx";
@@ -85,6 +85,8 @@ interface AppState {
   addOpen: boolean;
   search: string;
   error: string | null;
+  scanning: boolean;
+  squelch: number; // dBm threshold for the scanner
 
   loadAll: () => Promise<void>;
   loadReceivers: () => Promise<void>;
@@ -92,6 +94,10 @@ interface AppState {
   removeReceiver: (id: string) => Promise<void>;
   startReceiver: (id: string) => Promise<void>;
   stopReceiver: (id: string) => Promise<void>;
+  tune: (id: string, freqHz: number) => void;
+  setSquelch: (dbm: number) => void;
+  startScan: (id: string) => Promise<void>;
+  stopScan: () => void;
 
   setActive: (id: string | null) => void;
   setView: (v: View) => void;
@@ -119,6 +125,8 @@ interface AppState {
 }
 
 let toastSeq = 1;
+let tuneTimer: ReturnType<typeof setTimeout> | undefined;
+let scanActive = false; // module-level scan loop flag
 
 export const useStore = create<AppState>((set, get) => ({
   receivers: [],
@@ -138,6 +146,8 @@ export const useStore = create<AppState>((set, get) => ({
   addOpen: false,
   search: "",
   error: null,
+  scanning: false,
+  squelch: -90,
 
   loadAll: async () => {
     await Promise.all([get().loadReceivers(), get().loadBookmarks(), get().loadAlerts()]);
@@ -199,6 +209,62 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (e) {
       set({ error: String(e) });
     }
+  },
+
+  // Optimistic local freq change (so the readout moves live), debounced backend
+  // retune (one reconnect after the knob settles, not per-tick).
+  tune: (id, freqHz) => {
+    const f = Math.max(0, Math.round(freqHz));
+    set({ receivers: get().receivers.map((r) => (r.id === id ? { ...r, freq_hz: f } : r)) });
+    clearTimeout(tuneTimer);
+    tuneTimer = setTimeout(() => {
+      invoke("tune", { id, freqHz: f }).catch((e) => set({ error: String(e) }));
+    }, 350);
+  },
+
+  setSquelch: (dbm) => set({ squelch: dbm }),
+
+  // Band scan: sweep ±100 kHz around the active VFO in 1 kHz steps via live
+  // retune, stopping when the S-meter clears the squelch threshold.
+  startScan: async (id) => {
+    const rx = get().receivers.find((r) => r.id === id);
+    if (!rx) return;
+    const st = get().sessionStatus[id] ?? "stopped";
+    if (st === "stopped") await get().startReceiver(id);
+    scanActive = true;
+    set({ scanning: true });
+
+    const base = rx.freq_hz;
+    const lo = Math.max(0, base - 100_000);
+    const hi = base + 100_000;
+    const stepHz = 1000;
+    let f = base;
+    const dwell = 600;
+
+    const tick = () => {
+      if (!scanActive) return;
+      f += stepHz;
+      if (f > hi) f = lo;
+      // optimistic readout + immediate (non-debounced) live retune
+      set({ receivers: get().receivers.map((r) => (r.id === id ? { ...r, freq_hz: f } : r)) });
+      invoke("tune", { id, freqHz: f }).catch((e) => set({ error: String(e) }));
+      setTimeout(() => {
+        if (!scanActive) return;
+        const d = lastDbm.get(id);
+        if (d != null && d >= get().squelch) {
+          scanActive = false;
+          set({ scanning: false }); // stop on signal
+          return;
+        }
+        tick();
+      }, dwell);
+    };
+    setTimeout(tick, st === "stopped" ? 2600 : 250);
+  },
+
+  stopScan: () => {
+    scanActive = false;
+    set({ scanning: false });
   },
 
   setActive: (id) => set({ activeId: id, view: "workspace" }),
@@ -318,7 +384,8 @@ export const useStore = create<AppState>((set, get) => ({
     });
     const u2 = await listen<TelemetryFrame>("telemetry", (e) => {
       // Route to a per-receiver bus instead of the store — avoids re-rendering the
-      // whole UI on every telemetry tick.
+      // whole UI on every telemetry tick. Also snapshot dBm for the scanner.
+      if (e.payload.s_meter_dbm != null) lastDbm.set(e.payload.receiver_id, e.payload.s_meter_dbm);
       telemetryBus.emit(e.payload.receiver_id, {
         s_meter_dbm: e.payload.s_meter_dbm,
         snr_db: e.payload.snr_db,

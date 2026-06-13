@@ -30,6 +30,7 @@ fn main() {
             commands::list_receivers,
             commands::start_receiver,
             commands::stop_receiver,
+            commands::tune,
             commands::query_transcripts,
             commands::get_settings,
             commands::set_settings,

@@ -80,6 +80,20 @@ impl Db {
         Ok(())
     }
 
+    pub fn update_receiver_freq(&self, id: &str, freq_hz: u64) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE receiver SET freq_hz = ?1 WHERE id = ?2", params![freq_hz, id])?;
+        Ok(())
+    }
+
+    pub fn get_receiver_freq(&self, id: &str) -> Option<u64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT freq_hz FROM receiver WHERE id=?1", params![id], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn insert_transcript(
         &self,

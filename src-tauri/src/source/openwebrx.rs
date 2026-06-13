@@ -72,6 +72,7 @@ impl OpenWebRX {
         _telem_tx: mpsc::Sender<TelemetryFrame>,
         app: &AppHandle,
         id: &str,
+        tune_rx: &mut mpsc::Receiver<u64>,
     ) -> Result<(), SourceError> {
         let cfg = self
             .config
@@ -107,9 +108,24 @@ impl OpenWebRX {
         let mut started = false;
         let mut compression = String::from("adpcm"); // OWRX default
         let mut adpcm = OwrxAdpcm::new();
+        let mut center: Option<i64> = None;
 
         let result = loop {
-            match read.next().await {
+            tokio::select! {
+                tuned = tune_rx.recv() => {
+                    if let (Some(f), Some(c)) = (tuned, center) {
+                        // Live retune: move the demod offset (no reconnect).
+                        let offset = f as i64 - c;
+                        let params = serde_json::json!({
+                            "type": "dspcontrol",
+                            "params": { "low_cut": low_cut, "high_cut": high_cut, "offset_freq": offset, "mod": mode, "squelch_level": -150 }
+                        });
+                        if write.send(Message::Text(params.to_string())).await.is_err() {
+                            break Err(SourceError("retune send failed".into()));
+                        }
+                    }
+                }
+                msg = read.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     let t = text.trim();
                     if t.starts_with("CLIENT DE SERVER") {
@@ -123,10 +139,10 @@ impl OpenWebRX {
                         if let Some(c) = value.get("audio_compression").and_then(|v| v.as_str()) {
                             compression = c.to_string();
                         }
-                        if !started {
-                            if let Some(center) = value.get("center_freq").and_then(|v| v.as_i64()) {
-                                let offset = cfg.freq_hz as i64 - center;
-                                // Start DSP and send demod params.
+                        if let Some(c) = value.get("center_freq").and_then(|v| v.as_i64()) {
+                            center = Some(c);
+                            if !started {
+                                let offset = cfg.freq_hz as i64 - c;
                                 let start = serde_json::json!({"type":"dspcontrol","action":"start"});
                                 let params = serde_json::json!({
                                     "type": "dspcontrol",
@@ -186,6 +202,7 @@ impl OpenWebRX {
                 Some(Ok(_)) => continue,
                 Some(Err(e)) => break Err(SourceError(format!("ws error: {e}"))),
                 None => break Err(SourceError("connection closed".into())),
+                }
             }
         };
 

@@ -11,10 +11,9 @@
 
 use super::{AudioFrame, SourceError, TelemetryFrame};
 use crate::audio::adpcm::ImaAdpcm;
-use crate::model::{ReceiverConfig, SessionStatus};
+use crate::model::ReceiverConfig;
 use futures::{SinkExt, StreamExt};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::AppHandle;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -62,29 +61,15 @@ impl KiwiSDR {
     /// Connect, configure, and stream until the connection drops or errors.
     /// Emits `SessionStatus::Live` once configured. Returns `Err` on disconnect so
     /// the caller can apply reconnect backoff.
-    pub async fn run(
-        self,
-        audio_tx: mpsc::Sender<AudioFrame>,
-        telem_tx: mpsc::Sender<TelemetryFrame>,
-        app: &AppHandle,
-        id: &str,
-    ) -> Result<(), SourceError> {
-        let app = app.clone();
-        let id = id.to_string();
-        self.stream(audio_tx, telem_tx, move || {
-            crate::events::emit_session(&app, &id, SessionStatus::Live, None)
-        })
-        .await
-    }
-
-    /// Core connect + stream loop, decoupled from the UI. `on_live` is invoked once
-    /// the connection is configured and audio is expected (so tests can run it
-    /// without an AppHandle).
+    /// Core connect + stream loop, decoupled from the UI. `on_live` runs once the
+    /// connection is configured. `tune_rx` delivers live retune requests (new freq
+    /// in Hz) which are applied on the open socket — no reconnect.
     pub async fn stream(
         self,
         audio_tx: mpsc::Sender<AudioFrame>,
         telem_tx: mpsc::Sender<TelemetryFrame>,
         mut on_live: impl FnMut() + Send,
+        tune_rx: &mut mpsc::Receiver<u64>,
     ) -> Result<(), SourceError> {
         let cfg = self
             .config
@@ -140,6 +125,17 @@ impl KiwiSDR {
                 _ = keepalive.tick() => {
                     if write.send(Message::Text(String::from("SET keepalive"))).await.is_err() {
                         break Err(SourceError("connection closed".into()));
+                    }
+                }
+                tuned = tune_rx.recv() => {
+                    if let Some(f) = tuned {
+                        // Live retune on the open socket (no reconnect).
+                        let khz = f as f64 / 1000.0;
+                        let (lc, hc) = Self::passband(&mode);
+                        let cmd = format!("SET mod={mode} low_cut={lc} high_cut={hc} freq={khz:.2}");
+                        if write.send(Message::Text(cmd)).await.is_err() {
+                            break Err(SourceError("connection closed".into()));
+                        }
                     }
                 }
                 msg = read.next() => match msg {
@@ -220,8 +216,9 @@ mod live_tests {
         };
         let (atx, mut arx) = mpsc::channel::<AudioFrame>(256);
         let (ttx, _trx) = mpsc::channel::<TelemetryFrame>(64);
+        let (_tune_tx, mut tune_rx) = mpsc::channel::<u64>(8);
         let sdr = KiwiSDR::new(&cfg.url).with_config(cfg);
-        let stream = sdr.stream(atx, ttx, || println!("LIVE: configured, audio expected"));
+        let stream = sdr.stream(atx, ttx, || println!("LIVE: configured, audio expected"), &mut tune_rx);
         tokio::pin!(stream);
 
         let mut frames = 0usize;
