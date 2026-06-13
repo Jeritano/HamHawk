@@ -13,10 +13,11 @@ export function Waterfall({ id }: { id: string }) {
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return;
 
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const resize = () => {
       const r = canvas.getBoundingClientRect();
-      const w = Math.max(1, Math.floor(r.width));
-      const h = Math.max(1, Math.floor(r.height));
+      const w = Math.max(1, Math.floor(r.width * dpr));
+      const h = Math.max(1, Math.floor(r.height * dpr));
       if (w !== canvas.width || h !== canvas.height) {
         canvas.width = w;
         canvas.height = h;

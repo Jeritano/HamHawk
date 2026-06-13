@@ -4,6 +4,7 @@ import { Waterfall } from "./Waterfall";
 import { SpectrumTrace } from "./SpectrumTrace";
 import { SMeterArc } from "./SMeterArc";
 import { WorldMap, type MapPoint } from "./WorldMap";
+import { LeftBands } from "./LeftBands";
 import { extractGrid, gridToLatLon } from "../lib/maidenhead";
 import { formatFreq, formatTimeHMS } from "../lib/format";
 import { audioPlayer } from "../lib/audioPlayer";
@@ -23,6 +24,7 @@ export function Rig() {
   const sessionStatus = useStore((s) => s.sessionStatus);
   const monitoredId = useStore((s) => s.monitoredId);
   const recordingIds = useStore((s) => s.recordingIds);
+  const setActive = useStore((s) => s.setActive);
   const startReceiver = useStore((s) => s.startReceiver);
   const stopReceiver = useStore((s) => s.stopReceiver);
   const setMonitor = useStore((s) => s.setMonitor);
@@ -82,6 +84,7 @@ export function Rig() {
               Ham<b>Hawk</b>
             </div>
           </div>
+          <div className="model">HX-1 · HF/VHF SDR MONITOR</div>
           <div className="rigbtn power">
             <div className="led" />
             <div className="k">POWER</div>
@@ -152,6 +155,7 @@ export function Rig() {
             <div className="k">SET</div>
             <div className="v">menu</div>
           </button>
+          <LeftBands />
         </div>
 
         {/* CENTER LCD */}
@@ -269,6 +273,39 @@ export function Rig() {
               value={squelch}
               onChange={(e) => setSquelch(Number(e.target.value))}
             />
+          </div>
+
+          <div className="rmem">
+            <div className="rmem-head">Memory · {receivers.length}</div>
+            <div className="rmem-list">
+              {receivers.map((r) => {
+                const st = sessionStatus[r.id] ?? "stopped";
+                return (
+                  <button
+                    key={r.id}
+                    className={"rmem-item" + (activeId === r.id ? " active" : "")}
+                    onClick={() => setActive(r.id)}
+                  >
+                    <div className="r1">
+                      <span className={"dot " + st} />
+                      <span className="fr">{formatFreq(r.freq_hz)}</span>
+                      <span className="spacer" />
+                      <span
+                        className="rmem-go"
+                        title={st === "stopped" ? "Start" : "Stop"}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          st === "stopped" ? startReceiver(r.id) : stopReceiver(r.id);
+                        }}
+                      >
+                        {st === "stopped" ? "▶" : "■"}
+                      </span>
+                    </div>
+                    <div className="nm">{r.label || r.url}</div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
       </div>
