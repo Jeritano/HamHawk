@@ -83,6 +83,7 @@ interface AppState {
   paletteOpen: boolean;
   settingsOpen: boolean;
   addOpen: boolean;
+  editId: string | null;
   search: string;
   error: string | null;
   scanning: boolean;
@@ -92,6 +93,8 @@ interface AppState {
   loadReceivers: () => Promise<void>;
   addReceiver: (cfg: Omit<ReceiverConfig, "id" | "enabled">, start?: boolean) => Promise<void>;
   removeReceiver: (id: string) => Promise<void>;
+  updateReceiver: (cfg: ReceiverConfig) => Promise<void>;
+  setEditId: (id: string | null) => void;
   startReceiver: (id: string) => Promise<void>;
   stopReceiver: (id: string) => Promise<void>;
   tune: (id: string, freqHz: number) => void;
@@ -144,6 +147,7 @@ export const useStore = create<AppState>((set, get) => ({
   paletteOpen: false,
   settingsOpen: false,
   addOpen: false,
+  editId: null,
   search: "",
   error: null,
   scanning: false,
@@ -187,8 +191,27 @@ export const useStore = create<AppState>((set, get) => ({
       const receivers = get().receivers.filter((r) => r.id !== id);
       set({
         receivers,
+        editId: get().editId === id ? null : get().editId,
         activeId: get().activeId === id ? receivers[0]?.id ?? null : get().activeId,
       });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  setEditId: (id) => set({ editId: id }),
+
+  // Save edits to a memory (label/freq/mode/lane). Upserts to the DB; if the
+  // session is running, restart it so the new settings take effect.
+  updateReceiver: async (cfg) => {
+    try {
+      await invoke("update_receiver", { cfg });
+      set({
+        receivers: get().receivers.map((r) => (r.id === cfg.id ? cfg : r)),
+        editId: null,
+      });
+      const st = get().sessionStatus[cfg.id] ?? "stopped";
+      if (st !== "stopped") await get().startReceiver(cfg.id);
     } catch (e) {
       set({ error: String(e) });
     }

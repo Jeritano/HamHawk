@@ -4,6 +4,7 @@ import { Rig } from "./components/Rig";
 import { CommandPalette } from "./components/CommandPalette";
 import { SettingsModal } from "./components/SettingsModal";
 import { AddReceiverModal } from "./components/AddReceiverModal";
+import { EditMemoryModal } from "./components/EditMemoryModal";
 
 export default function App() {
   const setPaletteOpen = useStore((s) => s.setPaletteOpen);
@@ -34,6 +35,7 @@ export default function App() {
       <CommandPalette />
       <SettingsModal />
       <AddReceiverModal />
+      <EditMemoryModal />
       <Toasts />
     </>
   );

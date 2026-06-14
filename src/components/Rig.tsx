@@ -25,6 +25,7 @@ export function Rig() {
   const monitoredId = useStore((s) => s.monitoredId);
   const recordingIds = useStore((s) => s.recordingIds);
   const setActive = useStore((s) => s.setActive);
+  const setEditId = useStore((s) => s.setEditId);
   const startReceiver = useStore((s) => s.startReceiver);
   const stopReceiver = useStore((s) => s.stopReceiver);
   const setMonitor = useStore((s) => s.setMonitor);
@@ -290,6 +291,16 @@ export function Rig() {
                       <span className={"dot " + st} />
                       <span className="fr">{formatFreq(r.freq_hz)}</span>
                       <span className="spacer" />
+                      <span
+                        className="rmem-go"
+                        title="Edit / fine-tune"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditId(r.id);
+                        }}
+                      >
+                        ✎
+                      </span>
                       <span
                         className="rmem-go"
                         title={st === "stopped" ? "Start" : "Stop"}

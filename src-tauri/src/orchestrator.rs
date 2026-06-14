@@ -178,6 +178,8 @@ impl Orchestrator {
         {
             let app = self.app.clone();
             let id = id.to_string();
+            let rec_dir = self.recordings_dir();
+            let name = cfg.label.clone().unwrap_or_else(|| cfg.url.clone());
             tasks.push(spawn(audio_tap(
                 id,
                 app,
@@ -185,6 +187,8 @@ impl Orchestrator {
                 pipe_tx,
                 self.monitored.clone(),
                 self.record_ids.clone(),
+                rec_dir,
+                name,
             )));
         }
 
@@ -377,7 +381,18 @@ impl Orchestrator {
             .and_then(|s| s.parse().ok())
             .unwrap_or(2);
         let model_path = self.db.get_setting("whisper_model_path").ok().flatten();
-        Settings { asr_worker_count: count, whisper_model_path: model_path }
+        let recording_dir = self.db.get_setting("recording_dir").ok().flatten();
+        Settings { asr_worker_count: count, whisper_model_path: model_path, recording_dir }
+    }
+
+    /// Effective recordings folder: the configured one, else ~/.hamhawk/recordings.
+    pub fn recordings_dir(&self) -> String {
+        if let Some(d) = self.db.get_setting("recording_dir").ok().flatten() {
+            if !d.trim().is_empty() {
+                return d;
+            }
+        }
+        data_dir().join("recordings").to_string_lossy().to_string()
     }
 
     pub fn set_settings(&self, settings: &Settings) -> Result<(), String> {
@@ -387,6 +402,11 @@ impl Orchestrator {
         if let Some(ref path) = settings.whisper_model_path {
             self.db
                 .set_setting("whisper_model_path", path)
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(ref dir) = settings.recording_dir {
+            self.db
+                .set_setting("recording_dir", dir)
                 .map_err(|e| e.to_string())?;
         }
         // Drop the shared ASR pool so it rebuilds with the new model/worker count
@@ -472,6 +492,7 @@ async fn source_loop(
 
 /// Tap between source and lane: emit waterfall rows, stream monitored audio,
 /// record to WAV, then forward the frame downstream.
+#[allow(clippy::too_many_arguments)]
 async fn audio_tap(
     id: String,
     app: AppHandle,
@@ -479,6 +500,8 @@ async fn audio_tap(
     pipe_tx: mpsc::Sender<AudioFrame>,
     monitored: Arc<Mutex<Option<String>>>,
     record_ids: Arc<Mutex<HashSet<String>>>,
+    rec_dir: String,
+    name: String,
 ) {
     let mut sg = Spectrogram::new(1024, 128);
     let mut writer: Option<hound::WavWriter<BufWriter<File>>> = None;
@@ -504,7 +527,7 @@ async fn audio_tap(
         let want_record = record_ids.lock().unwrap().contains(&id);
         if want_record {
             if writer.is_none() {
-                writer = open_wav(&id, frame.sample_rate);
+                writer = open_wav(&rec_dir, &name, frame.sample_rate);
             }
             if let Some(w) = writer.as_mut() {
                 for &s in &frame.samples {
@@ -524,14 +547,24 @@ async fn audio_tap(
     }
 }
 
-fn open_wav(id: &str, sample_rate: u32) -> Option<hound::WavWriter<BufWriter<File>>> {
-    let dir = data_dir().join("recordings");
-    std::fs::create_dir_all(&dir).ok()?;
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let path = dir.join(format!("{id}-{ts}.wav"));
+fn sanitize_name(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .collect();
+    let s = s.trim_matches('_').to_string();
+    let s = if s.is_empty() { "rx".to_string() } else { s };
+    s.chars().take(48).collect()
+}
+
+fn open_wav(dir: &str, name: &str, sample_rate: u32) -> Option<hound::WavWriter<BufWriter<File>>> {
+    let dir = std::path::Path::new(dir);
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::error!("failed to create recordings dir {}: {e}", dir.display());
+        return None;
+    }
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = dir.join(format!("{}-{ts}.wav", sanitize_name(name)));
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,
@@ -540,7 +573,7 @@ fn open_wav(id: &str, sample_rate: u32) -> Option<hound::WavWriter<BufWriter<Fil
     };
     match hound::WavWriter::create(&path, spec) {
         Ok(w) => {
-            log::info!("recording {id} -> {}", path.display());
+            log::info!("recording -> {}", path.display());
             Some(w)
         }
         Err(e) => {

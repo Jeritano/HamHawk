@@ -138,6 +138,11 @@ pub fn recording_ids(orchestrator: State<'_, Orchestrator>) -> Vec<String> {
 }
 
 #[tauri::command]
+pub fn recordings_dir(orchestrator: State<'_, Orchestrator>) -> String {
+    orchestrator.recordings_dir()
+}
+
+#[tauri::command]
 pub fn running_ids(orchestrator: State<'_, Orchestrator>) -> Vec<String> {
     orchestrator.running_ids()
 }

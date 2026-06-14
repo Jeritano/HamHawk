@@ -18,6 +18,8 @@ fn main() {
     let _ = env_logger::try_init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let db = Db::open().map_err(|e| e.to_string())?;
             app.manage(Orchestrator::new(db, app.handle().clone()));
@@ -40,6 +42,7 @@ fn main() {
             commands::start_recording,
             commands::stop_recording,
             commands::recording_ids,
+            commands::recordings_dir,
             commands::running_ids,
             commands::add_bookmark,
             commands::list_bookmarks,

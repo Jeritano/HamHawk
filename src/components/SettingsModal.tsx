@@ -1,20 +1,27 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore } from "../state/store";
 
 interface Settings {
   asr_worker_count: number;
   whisper_model_path?: string;
+  recording_dir?: string;
 }
 
 export function SettingsModal() {
   const open = useStore((s) => s.settingsOpen);
   const setOpen = useStore((s) => s.setSettingsOpen);
   const [settings, setSettings] = useState<Settings>({ asr_worker_count: 2 });
+  const [effectiveDir, setEffectiveDir] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (open) invoke<Settings>("get_settings").then(setSettings).catch(() => {});
+    if (open) {
+      invoke<Settings>("get_settings").then(setSettings).catch(() => {});
+      invoke<string>("recordings_dir").then(setEffectiveDir).catch(() => {});
+    }
   }, [open]);
 
   if (!open) return null;
@@ -28,6 +35,19 @@ export function SettingsModal() {
       /* surfaced elsewhere */
     }
     setSaving(false);
+  };
+
+  const chooseFolder = async () => {
+    const dir = await openDialog({ directory: true, multiple: false, title: "Choose recordings folder" });
+    if (typeof dir === "string") {
+      setSettings((s) => ({ ...s, recording_dir: dir }));
+      setEffectiveDir(dir);
+    }
+  };
+
+  const revealFolder = async () => {
+    const dir = settings.recording_dir || effectiveDir;
+    if (dir) await openPath(dir).catch(() => {});
   };
 
   return (
@@ -49,6 +69,27 @@ export function SettingsModal() {
               Parallel Whisper transcription workers.
             </div>
           </div>
+
+          <div>
+            <label className="fld">Recordings folder</label>
+            <input
+              className="input"
+              placeholder={effectiveDir}
+              value={settings.recording_dir ?? ""}
+              onChange={(e) => setSettings({ ...settings, recording_dir: e.target.value || undefined })}
+            />
+            <div className="row" style={{ marginTop: 8 }}>
+              <button className="btn sm" onClick={chooseFolder}>Choose…</button>
+              <button className="btn sm" onClick={revealFolder}>Reveal in Finder</button>
+              <span className="spacer" />
+            </div>
+            <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+              WAVs save as <code>&lt;station&gt;-&lt;date-time&gt;.wav</code> here. Currently:{" "}
+              <span style={{ color: "var(--teal)" }}>{settings.recording_dir || effectiveDir}</span>.
+              Applies to newly-started recordings.
+            </div>
+          </div>
+
           <div>
             <label className="fld">Whisper model path</label>
             <input

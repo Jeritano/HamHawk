@@ -52,6 +52,7 @@ pub struct TelemetryFrame {
 pub struct Settings {
     pub asr_worker_count: u32,
     pub whisper_model_path: Option<String>,
+    pub recording_dir: Option<String>,
 }
 
 /// One waterfall/spectrum row (log-magnitude bins, 0..255), pushed per receiver.
