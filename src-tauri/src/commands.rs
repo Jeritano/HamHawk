@@ -63,7 +63,10 @@ pub fn update_receiver(
     orchestrator: State<'_, Orchestrator>,
     cfg: ReceiverConfig,
 ) -> Result<(), String> {
-    validate_receiver(&cfg)?;
+    // URL scheme only — NOT the mode/lane check. In-app flows (selectBand applies
+    // a band's mode to the active VFO without changing its lane) legitimately
+    // produce transient mode/lane combos; rejecting them breaks band selection.
+    validate_url_scheme(&cfg)?;
     // INSERT OR REPLACE upserts, so re-adding replaces.
     orchestrator.add_receiver(cfg)
 }

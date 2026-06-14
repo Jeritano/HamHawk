@@ -39,7 +39,18 @@ button { font-family: inherit; color: inherit; cursor: pointer; }
 
 /* ===== chassis ===== */
 .rig {
-  height: 100vh; padding: 14px; display: flex;
+  /* Radio fills the window edge-to-edge with a uniform 4px reveal. The macOS
+     traffic lights (Overlay title bar) sit ON the chassis top-left; the left
+     column adds a small top inset so they don't cover the logo. */
+  height: 100vh; padding: 4px; display: flex;
+}
+/* Invisible full-width grab strip pinned to the very top of the window. Overlays
+   the top band (high z-index) so you can drag the window from anywhere up there;
+   it holds nothing, so the drag always registers. macOS layers the traffic lights
+   above it, so they stay clickable. Matches the Froglips treatment. */
+.window-drag-strip {
+  position: fixed; top: 0; left: 0; right: 0; height: 30px; z-index: 60;
+  -webkit-app-region: drag;
 }
 .chassis {
   flex: 1; display: grid;
@@ -60,7 +71,11 @@ button { font-family: inherit; color: inherit; cursor: pointer; }
 
 /* ===== side columns ===== */
 .col { display: flex; flex-direction: column; gap: 9px; min-height: 0; }
-.col.left { overflow: hidden; }
+/* Top inset clears the macOS traffic lights overlaid on the chassis top-left. */
+.col.left { overflow: hidden; padding-top: 22px; }
+/* ADD + SET share one row at half width each. */
+.rigbtn-row { display: flex; gap: 9px; }
+.rigbtn-row .rigbtn { flex: 1; min-width: 0; }
 .brandplate { display: flex; align-items: center; gap: 7px; padding: 2px 2px 8px; }
 .brandplate .logo {
   width: 22px; height: 22px; border-radius: 5px;
@@ -157,6 +172,9 @@ button { font-family: inherit; color: inherit; cursor: pointer; }
 .scope .wf { position: absolute; top: 46%; left: 0; right: 0; bottom: 0; }
 .scope .wf canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .scope-scale { position: absolute; bottom: 2px; left: 8px; right: 8px; display: flex; justify-content: space-between; font-family: var(--mono); font-size: 9px; color: var(--faint); z-index: 2; pointer-events: none; }
+.afscope-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+/* SUB meter removed for now — blank cell. */
+.vfo.sub-blank { background: #02100c; }
 
 /* data sub-views inside LCD */
 .lcd-data { position: absolute; inset: 0; overflow-y: auto; padding: 10px 14px; }

@@ -216,7 +216,13 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       await invoke("add_receiver", { cfg: full });
       set({ receivers: [...get().receivers, full], activeId: id, addOpen: false });
-      if (start) await get().startReceiver(id);
+      if (start) {
+        const ok = await get().startReceiver(id);
+        // Monitor it so you actually HEAR the new receiver, and so clicking its
+        // memory row toggles it OFF (monitoredId === id) instead of needing two
+        // clicks to "deselect".
+        if (ok) await get().setMonitor(id);
+      }
     } catch (e) {
       set({ error: String(e) });
     }
@@ -314,6 +320,7 @@ export const useStore = create<AppState>((set, get) => ({
       return;
     }
     clearTimeout(tuneTimer); // a pending debounced tune would fight the scan
+    lastDbm.delete(id); // drop any stale reading so the first step decides on a fresh sample
     // New scan generation — any previously-running scan loop self-cancels.
     const myGen = ++scanGen;
     scanActive = true;
@@ -429,15 +436,18 @@ export const useStore = create<AppState>((set, get) => ({
   // band you're already on (and playing) stops it.
   selectBand: async (freqHz, mode) => {
     const { receivers, activeId, sessionStatus, monitoredId } = get();
-    const active = receivers.find((r) => r.id === activeId) || receivers[0];
+    // Bands need a tunable SDR VFO. Prefer the active receiver, but if it's a
+    // scanner feed (not tunable) or unset, fall back to the first SDR receiver
+    // instead of erroring — clicking a band should just work.
+    let active = receivers.find((r) => r.id === activeId) || null;
+    if (!active || active.kind === "feed") {
+      active = receivers.find((r) => r.kind !== "feed") || null;
+    }
     if (!active) {
-      set({ error: "Add a receiver first, then pick a band" });
+      set({ error: "Add an SDR receiver (KiwiSDR/OpenWebRX) to use bands" });
       return;
     }
-    if (active.kind === "feed") {
-      set({ error: "Bands don't apply to a scanner feed — select an SDR VFO" });
-      return;
-    }
+    clearTimeout(tuneTimer); // cancel any pending debounced tune so it can't fire after this
     const running = (sessionStatus[active.id] ?? "stopped") !== "stopped";
     const onBand = active.freq_hz === freqHz && active.mode === mode;
     if (running && onBand && monitoredId === active.id) {
@@ -582,7 +592,7 @@ export const useStore = create<AppState>((set, get) => ({
   // already in memory. Either way: start it and listen (MAIN).
   applyBookmark: async (bm) => {
     const existing = get().receivers.find(
-      (r) => r.url === bm.url && r.freq_hz === bm.freq_hz && r.mode === bm.mode
+      (r) => r.url === bm.url && r.freq_hz === bm.freq_hz && r.mode === bm.mode && r.lane === bm.lane
     );
     if (existing) {
       if ((get().sessionStatus[existing.id] ?? "stopped") === "stopped") {

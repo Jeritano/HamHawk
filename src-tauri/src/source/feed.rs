@@ -167,6 +167,9 @@ fn decode_stream(url: &str, out: mpsc::Sender<AudioFrame>, cancel: Arc<AtomicBoo
         .map_err(|e| SourceError(format!("feed decoder: {e}")))?;
 
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    let mut buf_cap = 0u64; // dims the scratch buffer was sized for
+    let mut buf_rate = 0u32;
+    let mut buf_ch = 0usize;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
@@ -186,8 +189,15 @@ fn decode_stream(url: &str, out: mpsc::Sender<AudioFrame>, cancel: Arc<AtomicBoo
         let spec = *decoded.spec();
         let rate = spec.rate;
         let channels = spec.channels.count().max(1);
-        if sample_buf.is_none() {
-            sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
+        let cap = decoded.capacity() as u64;
+        // (Re)allocate the scratch buffer when the stream's spec or frame size
+        // changes — reusing a buffer sized for a different/smaller spec would
+        // panic or corrupt audio (rare, but some streams switch mid-flight).
+        if sample_buf.is_none() || cap > buf_cap || buf_rate != rate || buf_ch != channels {
+            sample_buf = Some(SampleBuffer::<f32>::new(cap, spec));
+            buf_cap = cap;
+            buf_rate = rate;
+            buf_ch = channels;
         }
         let sb = sample_buf.as_mut().unwrap();
         sb.copy_interleaved_ref(decoded);

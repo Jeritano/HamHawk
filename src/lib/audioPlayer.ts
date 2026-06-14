@@ -28,6 +28,7 @@ const PAN = 0.6; // L/R spread when both MAIN and SUB are active
 class AudioPlayer {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  private analyser: AnalyserNode | null = null;
   private lanes = new Map<string, Lane>();
   private mainId: string | null = null;
   private subId: string | null = null;
@@ -44,9 +45,22 @@ class AudioPlayer {
       this.ctx = new AudioContext();
       this.master = this.ctx.createGain();
       this.master.gain.value = this.volume;
-      this.master.connect(this.ctx.destination);
+      // Analyser is INLINE (master -> analyser -> destination), not a parallel
+      // fan-out. AnalyserNode is a transparent pass-through, so audio still
+      // reaches the speakers, and the single output path avoids any WKWebView
+      // fan-out quirk that could drop master -> destination. Feeds the AF Scope.
+      this.analyser = this.ctx.createAnalyser();
+      this.analyser.fftSize = 2048;
+      this.analyser.smoothingTimeConstant = 0.5;
+      this.master.connect(this.analyser);
+      this.analyser.connect(this.ctx.destination);
     }
     return this.ctx;
+  }
+
+  /** The passive analyser tap (null until the context exists / audio started). */
+  getAnalyser(): AnalyserNode | null {
+    return this.analyser;
   }
 
   /** Resume the AudioContext from within a user gesture. WKWebView keeps the

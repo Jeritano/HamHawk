@@ -2,16 +2,31 @@ import { useEffect, useState } from "react";
 import { useStore, type Kind, type Lane } from "../state/store";
 import { VOICE_MODES, DIGITAL_MODES, BANDS } from "../lib/format";
 
+// Resolve a Broadcastify feed ID, listen-link, or full stream URL into a direct
+// stream URL. Free public feeds stream at broadcastify.cdnstream1.com/<id>.
+function broadcastifyUrl(input: string): string | null {
+  const s = input.trim();
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) return s; // already a full URL — use as-is
+  const m = s.match(/feed\/(\d+)/i) || s.match(/^#?(\d+)$/);
+  return m ? `https://broadcastify.cdnstream1.com/${m[1]}` : null;
+}
+
+function broadcastifyId(input: string): string {
+  const m = input.match(/feed\/(\d+)/i) || input.match(/(\d+)/);
+  return m ? m[1] : input.trim();
+}
+
 export function AddReceiverModal() {
   const open = useStore((s) => s.addOpen);
   const setOpen = useStore((s) => s.setAddOpen);
   const addReceiver = useStore((s) => s.addReceiver);
   const addKind = useStore((s) => s.addKind);
 
-  const [kind, setKind] = useState<Kind>("kiwisdr");
-
+  // Dropdown value — "broadcastify" is a UI convenience that maps to a feed.
+  const [source, setSource] = useState<string>("kiwisdr");
   useEffect(() => {
-    if (open) setKind(addKind);
+    if (open) setSource(addKind);
   }, [open, addKind]);
   const [url, setUrl] = useState("");
   const [label, setLabel] = useState("");
@@ -21,23 +36,28 @@ export function AddReceiverModal() {
 
   if (!open) return null;
 
+  const isBroadcastify = source === "broadcastify";
+  const kind: Kind = isBroadcastify ? "feed" : (source as Kind);
   const isFeed = kind === "feed";
   const modes = lane === "voice" ? VOICE_MODES : DIGITAL_MODES;
   const mhzNum = Number(mhz);
   const mhzBad = !isFeed && mhz.trim() !== "" && !(mhzNum > 0);
-  const valid = url.trim() && (isFeed || mhzNum > 0);
+  const valid = isBroadcastify
+    ? broadcastifyUrl(url) != null
+    : url.trim() !== "" && (isFeed || mhzNum > 0);
 
   const submit = () => {
     if (!valid) return;
+    const resolvedUrl = isBroadcastify ? broadcastifyUrl(url)! : url.trim();
+    const defaultLabel = isBroadcastify ? `Broadcastify · ${broadcastifyId(url)}` : undefined;
     addReceiver({
       kind,
-      url: url.trim(),
-      label: label.trim() || undefined,
+      url: resolvedUrl,
+      label: label.trim() || defaultLabel,
       freq_hz: isFeed ? 0 : Math.round(Number(mhz) * 1e6),
       mode: isFeed ? "fm" : mode,
       lane: isFeed ? "voice" : lane,
     });
-    // reset
     setUrl("");
     setLabel("");
   };
@@ -50,10 +70,11 @@ export function AddReceiverModal() {
           <div className="grid2">
             <div>
               <label className="fld">Source</label>
-              <select className="input" value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
+              <select className="input" value={source} onChange={(e) => setSource(e.target.value)}>
                 <option value="kiwisdr">KiwiSDR</option>
                 <option value="openwebrx">OpenWebRX</option>
                 <option value="feed">Scanner Feed (stream URL)</option>
+                <option value="broadcastify">Broadcastify (scanner)</option>
               </select>
             </div>
             {!isFeed && (
@@ -75,18 +96,29 @@ export function AddReceiverModal() {
             )}
           </div>
           <div>
-            <label className="fld">URL</label>
+            <label className="fld">{isBroadcastify ? "Feed ID or link" : "URL"}</label>
             <input
               className="input"
-              placeholder={isFeed ? "https://…  MP3/AAC scanner stream URL" : "ws://host:port  or  http://host:port"}
+              placeholder={
+                isBroadcastify
+                  ? "34503   or   broadcastify.com/listen/feed/34503"
+                  : isFeed
+                    ? "https://…  MP3/AAC scanner stream URL"
+                    : "ws://host:port  or  http://host:port"
+              }
               value={url}
               onChange={(e) => setUrl(e.target.value)}
             />
-            {isFeed && (
+            {isBroadcastify && (
               <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-                Paste a direct audio-stream URL (e.g. a Broadcastify feed you have access to). It's
-                played and transcribed like any voice source. Police/P25 feeds = audio only (already
-                demodulated upstream).
+                Free public feed — paste the number from a broadcastify.com/listen/feed/<b>NNNN</b> page
+                (or the link). HamHawk builds the stream URL and transcribes it.
+              </div>
+            )}
+            {isFeed && !isBroadcastify && (
+              <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+                Paste a direct audio-stream URL (MP3/AAC). It's played and transcribed like any voice
+                source. Police/P25 feeds = audio only (already demodulated upstream).
               </div>
             )}
           </div>
@@ -132,7 +164,12 @@ export function AddReceiverModal() {
           )}
           <div>
             <label className="fld">Label (optional)</label>
-            <input className="input" placeholder={isFeed ? "e.g. County PD Dispatch" : "e.g. G8JNJ Kiwi — 20m"} value={label} onChange={(e) => setLabel(e.target.value)} />
+            <input
+              className="input"
+              placeholder={isBroadcastify ? "e.g. County PD Dispatch" : isFeed ? "e.g. County PD Dispatch" : "e.g. G8JNJ Kiwi — 20m"}
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+            />
           </div>
         </div>
         <div className="foot">

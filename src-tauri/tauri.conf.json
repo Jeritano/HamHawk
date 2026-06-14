@@ -16,7 +16,15 @@
         "label": "main",
         "title": "HamHawk",
         "width": 1200,
-        "height": 800
+        "height": 780,
+        "minWidth": 940,
+        "minHeight": 620,
+        "center": true,
+        "resizable": true,
+        "maximizable": true,
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ]
   },

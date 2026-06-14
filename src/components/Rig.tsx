@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore, type ReceiverConfig } from "../state/store";
 import { Waterfall } from "./Waterfall";
 import { SpectrumTrace } from "./SpectrumTrace";
+import { AudioScope } from "./AudioScope";
 import { SMeterArc } from "./SMeterArc";
 import { WorldMap, type MapPoint } from "./WorldMap";
 import { LeftBands } from "./LeftBands";
@@ -9,7 +10,7 @@ import { extractGrid, gridToLatLon } from "../lib/maidenhead";
 import { formatFreq, formatTimeHMS } from "../lib/format";
 import { audioPlayer } from "../lib/audioPlayer";
 
-type LcdView = "scope" | "text" | "map" | "activity" | "bmarks" | "alerts";
+type LcdView = "scope" | "afscope" | "text" | "map" | "activity" | "bmarks" | "alerts";
 
 function freqParts(hz: number) {
   const s = hz.toLocaleString("de-DE"); // dot-grouped, e.g. 7.077.600
@@ -88,10 +89,11 @@ export function Rig() {
 
   return (
     <div className="rig">
+      <div className="window-drag-strip" data-tauri-drag-region />
       <div className="chassis">
         {/* LEFT COLUMN */}
         <div className="col left">
-          <div className="brandplate">
+          <div className="brandplate" data-tauri-drag-region>
             <div className="logo">H</div>
             <div className="txt">
               Ham<b>Hawk</b>
@@ -135,27 +137,29 @@ export function Rig() {
               </button>
             </div>
           </div>
-          <button className="rigbtn" onClick={() => openAdd("kiwisdr")}>
-            <div className="led" />
-            <div className="k">ADD</div>
-            <div className="v">vfo</div>
-          </button>
           <button className="rigbtn" onClick={() => setPaletteOpen(true)}>
             <div className="led" />
             <div className="k">SEARCH</div>
             <div className="v">⌘K</div>
           </button>
-          <button className="rigbtn" onClick={() => setSettingsOpen(true)}>
-            <div className="led" />
-            <div className="k">SET</div>
-            <div className="v">menu</div>
-          </button>
+          <div className="rigbtn-row">
+            <button className="rigbtn" onClick={() => openAdd("kiwisdr")}>
+              <div className="led" />
+              <div className="k">ADD</div>
+              <div className="v">vfo</div>
+            </button>
+            <button className="rigbtn" onClick={() => setSettingsOpen(true)}>
+              <div className="led" />
+              <div className="k">SET</div>
+              <div className="v">menu</div>
+            </button>
+          </div>
           <LeftBands />
         </div>
 
         {/* CENTER LCD */}
         <div className="lcd">
-          <div className="lcd-top">
+          <div className="lcd-top" data-tauri-drag-region>
             <span className="pill">ANT 1</span>
             <span className="pill">BW 2.4k</span>
             {main && <span className="pill">{main.mode.toUpperCase()}</span>}
@@ -167,11 +171,13 @@ export function Rig() {
 
           <div className="vfos">
             <Vfo rx={main} role="MAIN" />
-            <Vfo rx={sub} role="SUB" />
+            {/* SUB meter removed — leave the cell blank for now. */}
+            <div className="vfo sub-blank" />
           </div>
 
           <div className="lcd-body">
             {view === "scope" && <ScopeView main={main} sub={sub} />}
+            {view === "afscope" && <AudioScope />}
             {view === "text" && <TextView rx={main} />}
             {view === "map" && <MapView />}
             {view === "activity" && <ActivityView />}
@@ -183,6 +189,7 @@ export function Rig() {
             {(
               [
                 ["scope", "SCOPE"],
+                ["afscope", "AF SCOPE"],
                 ["text", "TEXT"],
                 ["map", "MAP"],
                 ["activity", "ACTIVITY"],
