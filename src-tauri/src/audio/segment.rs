@@ -75,6 +75,12 @@ impl Segmenter {
         if long_enough {
             Some(Segment { samples, ts_start: start_ts, ts_end: last_ts })
         } else {
+            log::debug!(
+                "segmenter: discarded {} ms segment ({} samples, below {} ms minimum)",
+                last_ts.saturating_sub(start_ts),
+                samples.len(),
+                (MIN_SAMPLES * 1000) / 16000
+            );
             None // too short: discarded
         }
     }

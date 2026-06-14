@@ -333,19 +333,20 @@ impl PskState {
     /// complete symbol is everything up to the next "00".
     fn scan_varicode(&mut self) {
         loop {
-            let trimmed_len = self.varicode_bits.trim_start_matches('0').len();
-            if trimmed_len != self.varicode_bits.len() {
-                self.varicode_bits = self.varicode_bits[self.varicode_bits.len() - trimmed_len..].to_string();
+            // Drop leading zeros (separator/idle) in place; now starts with '1' (or empty).
+            let lead = self.varicode_bits.len() - self.varicode_bits.trim_start_matches('0').len();
+            if lead > 0 {
+                self.varicode_bits.drain(..lead);
             }
-            // Now starts with '1' (or empty). A symbol ends at the next "00".
+            // A symbol ends at the next "00".
             match self.varicode_bits.find("00") {
                 Some(idx) => {
-                    let symbol = self.varicode_bits[..idx].to_string();
-                    // Keep the zeros; they get trimmed as the separator next iteration.
-                    self.varicode_bits = self.varicode_bits[idx..].to_string();
-                    if let Some(c) = varicode_to_char(&symbol) {
+                    if let Some(c) = varicode_to_char(&self.varicode_bits[..idx]) {
                         self.word.push(c);
                     }
+                    // Drop the symbol but keep the zeros; they get trimmed as the
+                    // separator on the next iteration.
+                    self.varicode_bits.drain(..idx);
                 }
                 None => break,
             }

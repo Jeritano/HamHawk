@@ -136,6 +136,11 @@ impl Decoder for Ft8Decoder {
             return Vec::new();
         }
 
+        // Each drained slot starts slot_secs after the previous one, since the
+        // buffer is contiguous audio — advance the window start by the slot
+        // duration rather than the arrival time of the current frame.
+        let slot_ms = (self.mode.slot_secs() * 1000.0) as i64;
+
         let mut out = Vec::new();
         while self.buffer.len() >= slot {
             let window: Vec<f32> = self.buffer.drain(..slot).collect();
@@ -147,7 +152,7 @@ impl Decoder for Ft8Decoder {
                     meta: serde_json::json!({ "mode": self.mode.label(), "freq_hz": freq }),
                 });
             }
-            self.window_start_ms = frame.ts_ms;
+            self.window_start_ms += slot_ms;
         }
         out
     }

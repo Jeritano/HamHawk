@@ -1,8 +1,10 @@
 export function formatFreq(hz: number): string {
+  if (!Number.isFinite(hz)) return "—";
   return (hz / 1e6).toFixed(3) + " MHz";
 }
 
 export function formatTimeHMS(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
   const d = new Date(ms);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;

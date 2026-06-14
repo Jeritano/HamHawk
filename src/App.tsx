@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useStore } from "./state/store";
 import { Rig } from "./components/Rig";
 import { CommandPalette } from "./components/CommandPalette";
@@ -14,7 +14,20 @@ export default function App() {
 
   useEffect(() => {
     loadAll();
+    let cancelled = false;
     const un = initListeners();
+    // If unmount happens before the unlisten promise settles, still detach
+    // every listener once it resolves so they don't leak across lifecycles.
+    un.then((f) => {
+      if (cancelled) f();
+    });
+    return () => {
+      cancelled = true;
+      un.then((f) => f());
+    };
+  }, [loadAll, initListeners]);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -22,11 +35,8 @@ export default function App() {
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      un.then((f) => f());
-    };
-  }, [loadAll, initListeners, setPaletteOpen]);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setPaletteOpen]);
 
   return (
     <>
@@ -44,10 +54,35 @@ export default function App() {
 function Toasts() {
   const toasts = useStore((s) => s.toasts);
   const dismiss = useStore((s) => s.dismissToast);
+  const timers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
   useEffect(() => {
-    const timers = toasts.map((t) => setTimeout(() => dismiss(t.key), 6000));
-    return () => timers.forEach(clearTimeout);
+    const live = timers.current;
+    const keys = new Set(toasts.map((t) => t.key));
+    // Start a 6s timer only for newly-added toasts; existing toasts keep
+    // their original countdown so a new toast can't extend old ones.
+    for (const t of toasts) {
+      if (!live.has(t.key)) {
+        live.set(
+          t.key,
+          setTimeout(() => dismiss(t.key), 6000),
+        );
+      }
+    }
+    // Drop timers for toasts that are already gone.
+    for (const [key, id] of live) {
+      if (!keys.has(key)) {
+        clearTimeout(id);
+        live.delete(key);
+      }
+    }
   }, [toasts, dismiss]);
+  useEffect(() => {
+    const live = timers.current;
+    return () => {
+      for (const id of live.values()) clearTimeout(id);
+      live.clear();
+    };
+  }, []);
   if (toasts.length === 0) return null;
   return (
     <div className="toast-wrap">

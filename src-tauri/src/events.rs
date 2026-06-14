@@ -7,8 +7,20 @@ pub const EVT_SESSION: &str = "session";
 pub const EVT_SPECTRUM: &str = "spectrum";
 pub const EVT_AUDIO: &str = "audio";
 pub const EVT_ALERT: &str = "alert";
+pub const EVT_RECORDING: &str = "recording";
 #[allow(dead_code)]
 pub const EVT_MODEL_DL: &str = "model_dl";
+
+/// Recording state for a receiver: started (true) / stopped (false), with an
+/// optional error so the UI never shows REC lit while nothing is being written.
+pub fn emit_recording(app: &AppHandle, receiver_id: &str, recording: bool, error: Option<String>) {
+    let payload = serde_json::json!({
+        "receiver_id": receiver_id,
+        "recording": recording,
+        "error": error,
+    });
+    let _ = app.emit(EVT_RECORDING, payload);
+}
 
 pub fn emit_spectrum(app: &AppHandle, frame: SpectrumFrame) {
     let _ = app.emit(EVT_SPECTRUM, frame);

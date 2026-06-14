@@ -9,7 +9,7 @@ import { extractGrid, gridToLatLon } from "../lib/maidenhead";
 import { formatFreq, formatTimeHMS } from "../lib/format";
 import { audioPlayer } from "../lib/audioPlayer";
 
-type LcdView = "scope" | "text" | "map" | "mem" | "activity" | "bmarks" | "alerts";
+type LcdView = "scope" | "text" | "map" | "activity" | "bmarks" | "alerts";
 
 function freqParts(hz: number) {
   const s = hz.toLocaleString("de-DE"); // dot-grouped, e.g. 7.077.600
@@ -174,7 +174,6 @@ export function Rig() {
             {view === "scope" && <ScopeView main={main} sub={sub} />}
             {view === "text" && <TextView rx={main} />}
             {view === "map" && <MapView />}
-            {view === "mem" && <MemView />}
             {view === "activity" && <ActivityView />}
             {view === "bmarks" && <BookmarksView />}
             {view === "alerts" && <AlertsView />}
@@ -186,7 +185,6 @@ export function Rig() {
                 ["scope", "SCOPE"],
                 ["text", "TEXT"],
                 ["map", "MAP"],
-                ["mem", "MEMORY"],
                 ["activity", "ACTIVITY"],
                 ["bmarks", "BMARKS"],
                 ["alerts", "ALERTS"],
@@ -236,7 +234,7 @@ export function Rig() {
               <button
                 className={"recbtn" + (recording ? " on" : "")}
                 disabled={!main}
-                title={recording ? "Recording — click to stop" : "Record to WAV"}
+                title={recording ? "Recording — click to stop" : "Record MAIN to WAV"}
                 onClick={() => main && toggleRecording(main.id)}
               >
                 <span className="recdot" />
@@ -467,53 +465,6 @@ function MapView() {
     <div className="lcd-data">
       <WorldMap points={points} />
       <div className="map-legend">{points.length} station(s) located from decoded grid squares.</div>
-    </div>
-  );
-}
-
-function MemView() {
-  const receivers = useStore((s) => s.receivers);
-  const activeId = useStore((s) => s.activeId);
-  const sessionStatus = useStore((s) => s.sessionStatus);
-  const setActive = useStore((s) => s.setActive);
-  const startReceiver = useStore((s) => s.startReceiver);
-  const stopReceiver = useStore((s) => s.stopReceiver);
-  return (
-    <div className="lcd-data">
-      <div className="section-title">
-        <span>Memory channels ({receivers.length})</span>
-      </div>
-      <div className="mem-grid">
-        {receivers.map((r) => {
-          const st = sessionStatus[r.id] ?? "stopped";
-          return (
-            <div
-              key={r.id}
-              className={"mem" + (activeId === r.id ? " active" : "")}
-              onClick={() => setActive(r.id)}
-            >
-              <div className="row">
-                <span className={"dot " + st} style={{ width: 7, height: 7, borderRadius: "50%" }} />
-                <span className="nm">{r.label || r.url}</span>
-              </div>
-              <div className="row">
-                <span className="fr">{formatFreq(r.freq_hz)}</span>
-                <span className="mt">{r.mode.toUpperCase()}</span>
-                <span className="spacer" />
-                <button
-                  className="btn sm"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    st === "stopped" ? startReceiver(r.id) : stopReceiver(r.id);
-                  }}
-                >
-                  {st === "stopped" ? "▶" : "■"}
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }

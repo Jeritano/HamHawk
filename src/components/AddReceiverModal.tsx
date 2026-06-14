@@ -23,7 +23,9 @@ export function AddReceiverModal() {
 
   const isFeed = kind === "feed";
   const modes = lane === "voice" ? VOICE_MODES : DIGITAL_MODES;
-  const valid = url.trim() && (isFeed || Number(mhz) > 0);
+  const mhzNum = Number(mhz);
+  const mhzBad = !isFeed && mhz.trim() !== "" && !(mhzNum > 0);
+  const valid = url.trim() && (isFeed || mhzNum > 0);
 
   const submit = () => {
     if (!valid) return;
@@ -93,7 +95,12 @@ export function AddReceiverModal() {
               <div className="grid2">
                 <div>
                   <label className="fld">Frequency (MHz)</label>
-                  <input className="input" value={mhz} onChange={(e) => setMhz(e.target.value)} />
+                  <input className="input" type="number" min="0" step="any" value={mhz} onChange={(e) => setMhz(e.target.value)} />
+                  {mhzBad && (
+                    <div className="faint" style={{ fontSize: 11, marginTop: 4, color: "var(--err, #e66)" }}>
+                      Frequency must be a positive number.
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="fld">Mode</label>
@@ -111,6 +118,7 @@ export function AddReceiverModal() {
                     <button
                       key={b.label}
                       onClick={() => {
+                        if (!Number.isFinite(b.hz) || b.hz <= 0) return;
                         setMhz((b.hz / 1e6).toString());
                         if (lane === "voice") setMode(b.mode);
                       }}

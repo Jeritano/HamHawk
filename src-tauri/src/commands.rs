@@ -2,17 +2,35 @@ use crate::model::{AlertHit, AlertRule, Bookmark, Lane, ReceiverConfig, Receiver
 use crate::orchestrator::Orchestrator;
 use tauri::State;
 
-#[tauri::command]
-pub fn add_receiver(
-    orchestrator: State<'_, Orchestrator>,
-    cfg: ReceiverConfig,
-) -> Result<ReceiverConfig, String> {
-    // Feeds are internet streams (no SDR mode to validate).
-    if matches!(cfg.kind, ReceiverKind::Feed) {
-        orchestrator.add_receiver(cfg.clone())?;
-        return Ok(cfg);
+// Reject URL schemes that don't belong to a given receiver kind so a
+// compromised frontend can't point a source at file://, gopher://, etc.
+// Private IPs / localhost are intentionally allowed (legit local SDRs).
+fn validate_url_scheme(cfg: &ReceiverConfig) -> Result<(), String> {
+    let scheme = match cfg.url.split_once("://") {
+        Some((s, _)) => s.to_ascii_lowercase(),
+        None => return Err("URL must include a scheme (e.g. http://, ws://)".into()),
+    };
+    let ok = match cfg.kind {
+        ReceiverKind::Feed => matches!(scheme.as_str(), "http" | "https"),
+        ReceiverKind::Kiwisdr | ReceiverKind::Openwebrx => {
+            matches!(scheme.as_str(), "http" | "https" | "ws" | "wss")
+        }
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("Unsupported URL scheme '{scheme}' for this receiver"))
     }
-    // Validate mode based on lane
+}
+
+// Validate URL scheme + (for SDRs) the mode↔lane combo. Feeds are raw streams
+// with no SDR mode to validate. Used by both add_receiver and update_receiver so
+// an edit can't bypass the checks an add enforces.
+fn validate_receiver(cfg: &ReceiverConfig) -> Result<(), String> {
+    validate_url_scheme(cfg)?;
+    if matches!(cfg.kind, ReceiverKind::Feed) {
+        return Ok(());
+    }
     match (&cfg.lane, cfg.mode.as_str()) {
         (Lane::Voice, mode) => {
             // CW is intentionally NOT a voice mode: Morse fed to Whisper is garbage.
@@ -27,7 +45,15 @@ pub fn add_receiver(
             }
         }
     }
-    
+    Ok(())
+}
+
+#[tauri::command]
+pub fn add_receiver(
+    orchestrator: State<'_, Orchestrator>,
+    cfg: ReceiverConfig,
+) -> Result<ReceiverConfig, String> {
+    validate_receiver(&cfg)?;
     orchestrator.add_receiver(cfg.clone())?;
     Ok(cfg)
 }
@@ -37,6 +63,7 @@ pub fn update_receiver(
     orchestrator: State<'_, Orchestrator>,
     cfg: ReceiverConfig,
 ) -> Result<(), String> {
+    validate_receiver(&cfg)?;
     // INSERT OR REPLACE upserts, so re-adding replaces.
     orchestrator.add_receiver(cfg)
 }

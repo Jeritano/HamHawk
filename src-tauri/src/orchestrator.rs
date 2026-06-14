@@ -107,7 +107,7 @@ impl Orchestrator {
     /// is loaded for the whole app — not one per receiver. Returns `None` if no
     /// model is available (transcription disabled).
     fn ensure_asr(&self) -> Option<mpsc::Sender<AsrJob>> {
-        let mut guard = self.asr.lock().unwrap();
+        let mut guard = self.asr.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pool) = guard.as_ref() {
             return Some(pool.job_tx.clone());
         }
@@ -130,7 +130,7 @@ impl Orchestrator {
 
     /// Tear down the shared ASR pool (aborts workers + consumer, frees the model).
     fn clear_asr(&self) {
-        if let Some(pool) = self.asr.lock().unwrap().take() {
+        if let Some(pool) = self.asr.lock().unwrap_or_else(|e| e.into_inner()).take() {
             for h in pool.handles {
                 h.abort();
             }
@@ -182,7 +182,7 @@ impl Orchestrator {
         }
         // Concurrency cap (restarting an already-running one is always allowed).
         {
-            let sessions = self.sessions.lock().unwrap();
+            let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             if !sessions.contains_key(id) && sessions.len() >= MAX_SESSIONS {
                 return Err(format!(
                     "at the {MAX_SESSIONS}-receiver limit — stop one before starting another"
@@ -190,7 +190,10 @@ impl Orchestrator {
             }
         }
         self.stop_receiver(id);
-        self.modes.lock().unwrap().insert(id.to_string(), cfg.mode.clone());
+        self.modes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_string(), cfg.mode.clone());
 
         // source -> tap -> lane
         let (raw_tx, raw_rx) = mpsc::channel::<AudioFrame>(256);
@@ -274,7 +277,7 @@ impl Orchestrator {
             tasks.push(spawn(telemetry_consumer(telem_rx, db, app, id)));
         }
 
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         // Re-check the cap under the lock (guards against concurrent starts racing
         // past the earlier check).
         if !sessions.contains_key(id) && sessions.len() >= MAX_SESSIONS {
@@ -297,49 +300,77 @@ impl Orchestrator {
         self.db
             .update_receiver_freq(id, freq_hz)
             .map_err(|e| e.to_string())?;
-        if let Some(sess) = self.sessions.lock().unwrap().get(id) {
+        if let Some(sess) = self.sessions.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
             let _ = sess.tune_tx.try_send(freq_hz); // best-effort live retune
         }
         Ok(())
     }
 
     pub fn stop_receiver(&self, id: &str) {
-        let removed = self.sessions.lock().unwrap().remove(id);
+        let removed = self.sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         if removed.is_some() {
             events::emit_session(&self.app, id, SessionStatus::Stopped, None);
         }
     }
 
     pub fn running_ids(&self) -> Vec<String> {
-        self.sessions.lock().unwrap().keys().cloned().collect()
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     // ---- audio monitor + recording ----
 
     pub fn set_monitor(&self, id: Option<String>) {
-        *self.monitored.lock().unwrap() = id;
+        // Never point the monitor at a receiver that isn't running — otherwise the
+        // UI would show it ON AIR while no tap ever emits audio (phantom monitor).
+        if let Some(ref s) = id {
+            if !self.sessions.lock().unwrap_or_else(|e| e.into_inner()).contains_key(s) {
+                return;
+            }
+        }
+        *self.monitored.lock().unwrap_or_else(|e| e.into_inner()) = id;
     }
 
     /// Set (or clear) the SUB receiver streamed as the right channel.
     pub fn set_monitor_sub(&self, id: Option<String>) {
-        *self.monitored_sub.lock().unwrap() = id;
+        if let Some(ref s) = id {
+            if !self.sessions.lock().unwrap_or_else(|e| e.into_inner()).contains_key(s) {
+                return;
+            }
+        }
+        *self.monitored_sub.lock().unwrap_or_else(|e| e.into_inner()) = id;
     }
 
     /// Set which receivers' waterfalls are on screen (only these emit spectrum).
     pub fn set_watched(&self, ids: Vec<String>) {
-        *self.watched.lock().unwrap() = ids.into_iter().collect();
+        *self.watched.lock().unwrap_or_else(|e| e.into_inner()) = ids.into_iter().collect();
     }
 
     pub fn start_recording(&self, id: &str) {
-        self.record_ids.lock().unwrap().insert(id.to_string());
+        self.record_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_string());
     }
 
     pub fn stop_recording(&self, id: &str) {
-        self.record_ids.lock().unwrap().remove(id);
+        self.record_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
     }
 
     pub fn recording_ids(&self) -> Vec<String> {
-        self.record_ids.lock().unwrap().iter().cloned().collect()
+        self.record_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 
     // ---- transcripts ----
@@ -399,7 +430,7 @@ impl Orchestrator {
         self.db
             .add_alert_rule(&rule.id, &rule.name, &rule.pattern, rule.enabled)
             .map_err(|e| e.to_string())?;
-        *self.alerts.lock().unwrap() = load_alert_rules(&self.db);
+        *self.alerts.lock().unwrap_or_else(|e| e.into_inner()) = load_alert_rules(&self.db);
         Ok(())
     }
 
@@ -413,7 +444,7 @@ impl Orchestrator {
 
     pub fn remove_alert_rule(&self, id: &str) -> Result<(), String> {
         self.db.remove_alert_rule(id).map_err(|e| e.to_string())?;
-        *self.alerts.lock().unwrap() = load_alert_rules(&self.db);
+        *self.alerts.lock().unwrap_or_else(|e| e.into_inner()) = load_alert_rules(&self.db);
         Ok(())
     }
 
@@ -441,8 +472,19 @@ impl Orchestrator {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(2);
-        let model_path = self.db.get_setting("whisper_model_path").ok().flatten();
-        let recording_dir = self.db.get_setting("recording_dir").ok().flatten();
+        // Treat a blank stored value as unset so a cleared field reads back as None.
+        let model_path = self
+            .db
+            .get_setting("whisper_model_path")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty());
+        let recording_dir = self
+            .db
+            .get_setting("recording_dir")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty());
         Settings { asr_worker_count: count, whisper_model_path: model_path, recording_dir }
     }
 
@@ -460,16 +502,14 @@ impl Orchestrator {
         self.db
             .set_setting("asr_worker_count", &settings.asr_worker_count.to_string())
             .map_err(|e| e.to_string())?;
-        if let Some(ref path) = settings.whisper_model_path {
-            self.db
-                .set_setting("whisper_model_path", path)
-                .map_err(|e| e.to_string())?;
-        }
-        if let Some(ref dir) = settings.recording_dir {
-            self.db
-                .set_setting("recording_dir", dir)
-                .map_err(|e| e.to_string())?;
-        }
+        // Always write both keys (empty string when None) so clearing a field
+        // actually persists instead of leaving the old value in the DB.
+        self.db
+            .set_setting("whisper_model_path", settings.whisper_model_path.as_deref().unwrap_or(""))
+            .map_err(|e| e.to_string())?;
+        self.db
+            .set_setting("recording_dir", settings.recording_dir.as_deref().unwrap_or(""))
+            .map_err(|e| e.to_string())?;
         // Drop the shared ASR pool so it rebuilds with the new model/worker count
         // next time a voice receiver starts.
         self.clear_asr();
@@ -580,16 +620,30 @@ async fn audio_tap(
     let mut writer: Option<hound::WavWriter<BufWriter<File>>> = None;
 
     while let Some(frame) = raw_rx.recv().await {
+        // Snapshot the per-frame routing flags with one lock each (poison-tolerant
+        // so an upstream panic can't cascade here).
+        let want_spectrum = watched
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&id);
+        let is_monitored = {
+            let main = monitored.lock().unwrap_or_else(|e| e.into_inner());
+            let sub = monitored_sub.lock().unwrap_or_else(|e| e.into_inner());
+            main.as_deref() == Some(id.as_str()) || sub.as_deref() == Some(id.as_str())
+        };
+        let want_record = record_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&id);
+
         // Only the on-screen receivers compute + emit a waterfall (skip the FFT
         // entirely for off-screen ones).
-        if watched.lock().unwrap().contains(&id) {
+        if want_spectrum {
             if let Some(bins) = sg.push(&frame.samples) {
                 events::emit_spectrum(&app, SpectrumFrame { receiver_id: id.clone(), bins });
             }
         }
 
-        let is_monitored = monitored.lock().unwrap().as_deref() == Some(id.as_str())
-            || monitored_sub.lock().unwrap().as_deref() == Some(id.as_str());
         if is_monitored {
             let bytes: Vec<u8> = frame
                 .samples
@@ -603,10 +657,25 @@ async fn audio_tap(
             );
         }
 
-        let want_record = record_ids.lock().unwrap().contains(&id);
         if want_record {
             if writer.is_none() {
-                writer = open_wav(&rec_dir, &name, frame.sample_rate);
+                match open_wav(&rec_dir, &name, frame.sample_rate) {
+                    Some(w) => {
+                        writer = Some(w);
+                        events::emit_recording(&app, &id, true, None);
+                    }
+                    None => {
+                        // Couldn't open the file — clear the flag and tell the UI
+                        // rather than leaving REC lit while nothing is written.
+                        record_ids.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                        events::emit_recording(
+                            &app,
+                            &id,
+                            false,
+                            Some(format!("recording failed — can't write to {rec_dir}")),
+                        );
+                    }
+                }
             }
             if let Some(w) = writer.as_mut() {
                 for &s in &frame.samples {
@@ -615,14 +684,19 @@ async fn audio_tap(
             }
         } else if let Some(w) = writer.take() {
             let _ = w.finalize();
+            events::emit_recording(&app, &id, false, None);
         }
 
         if pipe_tx.send(frame).await.is_err() {
             break;
         }
     }
+    // Session ended (stopped/dropped) while recording: finalize + tell the UI so
+    // the REC indicator clears instead of sticking on.
     if let Some(w) = writer.take() {
         let _ = w.finalize();
+        record_ids.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        events::emit_recording(&app, &id, false, None);
     }
 }
 
@@ -638,6 +712,17 @@ fn sanitize_name(name: &str) -> String {
 
 fn open_wav(dir: &str, name: &str, sample_rate: u32) -> Option<hound::WavWriter<BufWriter<File>>> {
     let dir = std::path::Path::new(dir);
+    // Only write to an absolute, traversal-free directory. Legit user-picked dirs
+    // are absolute; reject relative paths or any `..` component so a tampered
+    // setting can't redirect recordings outside the intended location.
+    if !dir.is_absolute()
+        || dir
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        log::error!("refusing unsafe recordings dir: {}", dir.display());
+        return None;
+    }
     if let Err(e) = std::fs::create_dir_all(dir) {
         log::error!("failed to create recordings dir {}: {e}", dir.display());
         return None;
@@ -664,7 +749,7 @@ fn open_wav(dir: &str, name: &str, sample_rate: u32) -> Option<hound::WavWriter<
 
 fn check_alerts(text: &str, id: &str, ts: i64, alerts: &Alerts, db: &Arc<Db>, app: &AppHandle) {
     let lc = text.to_lowercase();
-    let rules = alerts.lock().unwrap().clone();
+    let rules = alerts.lock().unwrap_or_else(|e| e.into_inner()).clone();
     for r in rules.iter().filter(|r| r.enabled && !r.pattern.is_empty()) {
         if lc.contains(&r.pattern.to_lowercase()) {
             let _ = db.insert_alert_hit(&r.id, &r.name, id, ts, text);
@@ -715,12 +800,18 @@ async fn digital_consumer(
 ) {
     while let Some(msgs) = rx.recv().await {
         for msg in msgs {
-            let new_id = db
-                .insert_transcript(
-                    &id, msg.ts_ms, msg.ts_ms, "digital", &mode, None, &msg.text, None, None,
-                    msg.snr_db,
-                )
-                .unwrap_or(0);
+            let new_id = match db.insert_transcript(
+                &id, msg.ts_ms, msg.ts_ms, "digital", &mode, None, &msg.text, None, None,
+                msg.snr_db,
+            ) {
+                Ok(new_id) => new_id,
+                Err(e) => {
+                    // DB write failed: don't emit a transcript the DB never stored
+                    // (an id=0 row would desync the UI from the database).
+                    log::error!("digital transcript insert failed for {id}: {e}");
+                    continue;
+                }
+            };
             check_alerts(&msg.text, &id, msg.ts_ms, &alerts, &db, &app);
             events::emit_transcript(
                 &app,
@@ -756,13 +847,24 @@ async fn global_result_consumer(
             continue;
         }
         let id = r.receiver_id.clone();
-        let mode = modes.lock().unwrap().get(&id).cloned().unwrap_or_default();
-        let new_id = db
-            .insert_transcript(
-                &id, r.ts_start, r.ts_end, "voice", &mode, r.src_lang.as_deref(), &r.text_en, None,
-                r.confidence, None,
-            )
-            .unwrap_or(0);
+        let mode = modes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        let new_id = match db.insert_transcript(
+            &id, r.ts_start, r.ts_end, "voice", &mode, r.src_lang.as_deref(), &r.text_en, None,
+            r.confidence, None,
+        ) {
+            Ok(new_id) => new_id,
+            Err(e) => {
+                // DB write failed: don't emit a transcript the DB never stored
+                // (an id=0 row would desync the UI from the database).
+                log::error!("voice transcript insert failed for {id}: {e}");
+                continue;
+            }
+        };
         check_alerts(&r.text_en, &id, r.ts_start, &alerts, &db, &app);
         events::emit_transcript(
             &app,
@@ -791,6 +893,9 @@ async fn telemetry_consumer(
 ) {
     let mut last_emit = Instant::now() - Duration::from_secs(1);
     let mut last_db = Instant::now() - Duration::from_secs(10);
+    // Last persisted (s_meter_dbm, snr_db) — skip the INSERT when unchanged so a
+    // stable signal doesn't write an identical row every interval.
+    let mut last_stored: Option<(Option<f32>, Option<f32>)> = None;
     while let Some(t) = rx.recv().await {
         let now = Instant::now();
         if now.duration_since(last_emit) >= Duration::from_millis(250) {
@@ -806,8 +911,11 @@ async fn telemetry_consumer(
                 },
             );
         }
-        if now.duration_since(last_db) >= Duration::from_secs(5) {
+        if now.duration_since(last_db) >= Duration::from_secs(5)
+            && last_stored != Some((t.s_meter_dbm, t.snr_db))
+        {
             last_db = now;
+            last_stored = Some((t.s_meter_dbm, t.snr_db));
             let ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)

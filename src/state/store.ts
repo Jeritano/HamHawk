@@ -141,6 +141,30 @@ let tuneTimer: ReturnType<typeof setTimeout> | undefined;
 let scanActive = false; // module-level scan loop flag
 let scanGen = 0; // bumped on every start/stop so stale loops self-cancel
 
+// Squelch is a UI scanner control; persist it across restarts via localStorage
+// (no backend round-trip needed).
+const SQUELCH_KEY = "hh_squelch";
+function loadSquelch(): number {
+  try {
+    const v = Number(localStorage.getItem(SQUELCH_KEY));
+    if (Number.isFinite(v) && v >= -120 && v <= -40) return v;
+  } catch {
+    /* ignore */
+  }
+  return -90;
+}
+
+// Serialize MAIN/SUB channel mutations so setMonitor and setSub can't interleave
+// their check-then-invoke windows and leave backend/frontend (or the audio lanes)
+// diverged. Each call chains onto the previous one.
+let monitorChain: Promise<void> = Promise.resolve();
+const withMonitorLock = (fn: () => Promise<void>): Promise<void> => {
+  const next = monitorChain.then(fn, fn);
+  // Keep the chain alive even if fn rejects (it shouldn't — both callers catch).
+  monitorChain = next.catch(() => {});
+  return next;
+};
+
 export const useStore = create<AppState>((set, get) => ({
   receivers: [],
   transcripts: [],
@@ -164,7 +188,7 @@ export const useStore = create<AppState>((set, get) => ({
   error: null,
   scanning: false,
   scanDir: 0,
-  squelch: -90,
+  squelch: loadSquelch(),
 
   loadAll: async () => {
     await Promise.all([get().loadReceivers(), get().loadBookmarks(), get().loadAlerts()]);
@@ -254,14 +278,29 @@ export const useStore = create<AppState>((set, get) => ({
   // retune (one reconnect after the knob settles, not per-tick).
   tune: (id, freqHz) => {
     const f = Math.max(0, Math.round(freqHz));
+    const prev = get().receivers.find((r) => r.id === id)?.freq_hz;
     set({ receivers: get().receivers.map((r) => (r.id === id ? { ...r, freq_hz: f } : r)) });
     clearTimeout(tuneTimer);
     tuneTimer = setTimeout(() => {
-      invoke("tune", { id, freqHz: f }).catch((e) => set({ error: String(e) }));
+      invoke("tune", { id, freqHz: f }).catch((e) => {
+        // Backend rejected the retune — revert the readout so it never shows a
+        // frequency the SDR isn't actually on.
+        if (prev != null) {
+          set({ receivers: get().receivers.map((r) => (r.id === id ? { ...r, freq_hz: prev } : r)) });
+        }
+        set({ error: String(e) });
+      });
     }, 350);
   },
 
-  setSquelch: (dbm) => set({ squelch: dbm }),
+  setSquelch: (dbm) => {
+    set({ squelch: dbm });
+    try {
+      localStorage.setItem(SQUELCH_KEY, String(dbm));
+    } catch {
+      /* ignore */
+    }
+  },
 
   // Band scan: sweep ±100 kHz around the active VFO in 1 kHz steps via live
   // retune, stopping when the S-meter clears the squelch threshold.
@@ -292,8 +331,16 @@ export const useStore = create<AppState>((set, get) => ({
     }
     set({ scanning: true, scanDir: dir });
 
+    // The receiver may have been removed during the startup awaits — abort rather
+    // than scan/tune a non-existent receiver.
+    const cur = get().receivers.find((r) => r.id === id);
+    if (!cur) {
+      scanActive = false;
+      set({ scanning: false, scanDir: 0 });
+      return;
+    }
     // Re-read current freq (so reversing direction continues from here).
-    const base = get().receivers.find((r) => r.id === id)?.freq_hz ?? rx.freq_hz;
+    const base = cur.freq_hz;
     const lo = Math.max(0, base - 100_000);
     const hi = base + 100_000;
     const stepHz = 1000 * (dir < 0 ? -1 : 1);
@@ -302,18 +349,40 @@ export const useStore = create<AppState>((set, get) => ({
 
     const tick = () => {
       if (!scanActive || myGen !== scanGen) return; // stale loop -> stop
+      const prev = get().receivers.find((r) => r.id === id)?.freq_hz ?? f;
       f += stepHz;
       if (f > hi) f = lo;
       if (f < lo) f = hi;
-      set({ receivers: get().receivers.map((r) => (r.id === id ? { ...r, freq_hz: f } : r)) });
+      const stepped = f;
+      set({ receivers: get().receivers.map((r) => (r.id === id ? { ...r, freq_hz: stepped } : r)) });
       lastDbm.delete(id); // require a FRESH reading at the new freq, not a stale one
-      invoke("tune", { id, freqHz: f }).catch((e) => set({ error: String(e) }));
-      setTimeout(() => {
-        if (!scanActive || myGen !== scanGen) return;
+      invoke("tune", { id, freqHz: stepped }).catch((e) => {
+        // Retune failed — revert the readout so it never shows an unconfirmed freq.
+        set({ receivers: get().receivers.map((r) => (r.id === id ? { ...r, freq_hz: prev } : r)) });
+        set({ error: String(e) });
+      });
+      const decide = (): boolean => {
+        // Returns true if a signal was found (scan should stop).
         const d = lastDbm.get(id);
         if (d != null && d >= get().squelch) {
           scanActive = false;
           set({ scanning: false, scanDir: 0 }); // stop on signal
+          return true;
+        }
+        return false;
+      };
+      setTimeout(() => {
+        if (!scanActive || myGen !== scanGen) return;
+        if (decide()) return;
+        // No reading cleared squelch yet. If telemetry simply hadn't arrived for
+        // this freq, give it one short grace re-check before advancing so a late
+        // S-meter sample can't be skipped past a real signal.
+        if (lastDbm.get(id) == null) {
+          setTimeout(() => {
+            if (!scanActive || myGen !== scanGen) return;
+            if (decide()) return;
+            tick();
+          }, 300);
           return;
         }
         tick();
@@ -379,8 +448,13 @@ export const useStore = create<AppState>((set, get) => ({
       await get().updateReceiver({ ...active, freq_hz: freqHz, mode }); // upsert + restart-if-running
     } else {
       // immediate (non-debounced) optimistic tune so it doesn't race startReceiver
+      const prev = active.freq_hz;
       set({ receivers: get().receivers.map((r) => (r.id === active.id ? { ...r, freq_hz: freqHz } : r)) });
-      invoke("tune", { id: active.id, freqHz }).catch((e) => set({ error: String(e) }));
+      invoke("tune", { id: active.id, freqHz }).catch((e) => {
+        // Revert on rejection so the readout never shows an unconfirmed freq.
+        set({ receivers: get().receivers.map((r) => (r.id === active.id ? { ...r, freq_hz: prev } : r)) });
+        set({ error: String(e) });
+      });
     }
     let ok = (get().sessionStatus[active.id] ?? "stopped") !== "stopped";
     if (!ok) ok = await get().startReceiver(active.id);
@@ -416,46 +490,55 @@ export const useStore = create<AppState>((set, get) => ({
 
   // MAIN (left) channel. A receiver can't be both MAIN and SUB — assigning it to
   // MAIN clears it from SUB.
-  setMonitor: async (id) => {
-    try {
-      await invoke("set_monitor", { id });
-      set({ monitoredId: id });
-      if (id && get().subId === id) {
-        await invoke("set_monitor_sub", { id: null });
-        set({ subId: null });
+  setMonitor: (id) =>
+    withMonitorLock(async () => {
+      try {
+        await invoke("set_monitor", { id });
+        set({ monitoredId: id });
+        if (id && get().subId === id) {
+          await invoke("set_monitor_sub", { id: null });
+          set({ subId: null });
+        }
+      } catch (e) {
+        set({ error: String(e) });
+      } finally {
+        // Always resync the player to whatever the store actually committed, even if
+        // a later invoke threw — otherwise audioPlayer keeps routing to a stale MAIN.
+        const main = get().monitoredId;
+        const sub = get().subId;
+        audioPlayer.setLanes(main, sub);
+        if (main || sub) {
+          audioPlayer.start();
+          audioPlayer.reset(); // start the new channel promptly, not behind the old queue
+        } else {
+          audioPlayer.stop();
+        }
       }
-      const sub = get().subId;
-      audioPlayer.setLanes(id, sub);
-      if (id || sub) {
-        audioPlayer.start();
-        audioPlayer.reset(); // start the new channel promptly, not behind the old queue
-      } else {
-        audioPlayer.stop();
-      }
-    } catch (e) {
-      set({ error: String(e) });
-    }
-  },
+    }),
 
   // SUB (right) channel for true dual receive. Pass null to clear. Ignored if the
   // id is already MAIN (can't be both).
-  setSub: async (id) => {
-    try {
-      if (id && id === get().monitoredId) return;
-      await invoke("set_monitor_sub", { id });
-      set({ subId: id });
-      const main = get().monitoredId;
-      audioPlayer.setLanes(main, id);
-      if (main || id) {
-        audioPlayer.start();
-        audioPlayer.reset();
-      } else {
-        audioPlayer.stop();
+  setSub: (id) =>
+    withMonitorLock(async () => {
+      if (id && id === get().monitoredId) return; // can't be both MAIN and SUB
+      try {
+        await invoke("set_monitor_sub", { id });
+        set({ subId: id });
+      } catch (e) {
+        set({ error: String(e) });
+      } finally {
+        // Always resync the player to the committed store state (see setMonitor).
+        const main = get().monitoredId;
+        const sub = get().subId;
+        audioPlayer.setLanes(main, sub);
+        if (main || sub) {
+          audioPlayer.start();
+          audioPlayer.reset();
+        } else {
+          audioPlayer.stop();
+        }
       }
-    } catch (e) {
-      set({ error: String(e) });
-    }
-  },
+    }),
 
   toggleRecording: async (id) => {
     const recording = get().recordingIds.includes(id);
@@ -494,11 +577,29 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  // Tune to a bookmark. Reuse an existing matching receiver (same node + freq +
+  // mode) instead of spawning a duplicate on every apply; only add it if it isn't
+  // already in memory. Either way: start it and listen (MAIN).
   applyBookmark: async (bm) => {
+    const existing = get().receivers.find(
+      (r) => r.url === bm.url && r.freq_hz === bm.freq_hz && r.mode === bm.mode
+    );
+    if (existing) {
+      if ((get().sessionStatus[existing.id] ?? "stopped") === "stopped") {
+        const ok = await get().startReceiver(existing.id);
+        if (!ok) return;
+      }
+      set({ activeId: existing.id });
+      await get().setMonitor(existing.id);
+      return;
+    }
     await get().addReceiver(
       { kind: bm.kind, url: bm.url, label: bm.label, freq_hz: bm.freq_hz, mode: bm.mode, lane: bm.lane },
       true
     );
+    // addReceiver sets activeId + starts but doesn't monitor — make it audible.
+    const id = get().activeId;
+    if (id) await get().setMonitor(id);
   },
 
   loadAlerts: async () => {
@@ -548,9 +649,25 @@ export const useStore = create<AppState>((set, get) => ({
         status: e.payload.status,
       });
     });
-    const u3 = await listen<{ receiver_id: string; status: string }>("session", (e) => {
-      set({ sessionStatus: { ...get().sessionStatus, [e.payload.receiver_id]: e.payload.status } });
-    });
+    const u3 = await listen<{ receiver_id: string; status: string; reason?: string }>(
+      "session",
+      (e) => {
+        const { receiver_id: id, status, reason } = e.payload;
+        // Surface WHY a session is struggling — once per reconnect streak, not on
+        // every backoff tick — so it isn't a mystery "connecting/reconnecting" loop.
+        if (status === "reconnecting" && get().sessionStatus[id] !== "reconnecting") {
+          const rx = get().receivers.find((r) => r.id === id);
+          const name = rx?.label || rx?.url || id;
+          set({
+            toasts: [
+              ...get().toasts,
+              { key: toastSeq++, ruleName: name, text: reason ? `Reconnecting — ${reason}` : "Reconnecting…" },
+            ],
+          });
+        }
+        set({ sessionStatus: { ...get().sessionStatus, [id]: status } });
+      }
+    );
     const u4 = await listen<{ receiver_id: string; bins: number[] }>("spectrum", (e) => {
       spectrumBus.emit(e.payload.receiver_id, e.payload.bins);
     });
@@ -569,6 +686,27 @@ export const useStore = create<AppState>((set, get) => ({
         toasts: [...get().toasts, { key, ruleName: e.payload.rule_name, text: e.payload.text }],
       });
     });
+    // Authoritative recording state from the backend: keeps the REC indicator in
+    // sync when a recording stops on its own (session drop) and surfaces a toast
+    // if the file couldn't be opened (so REC never lies about writing).
+    const u7 = await listen<{ receiver_id: string; recording: boolean; error?: string | null }>(
+      "recording",
+      (e) => {
+        const { receiver_id: id, recording, error } = e.payload;
+        const cur = get().recordingIds;
+        const next = recording ? Array.from(new Set([...cur, id])) : cur.filter((x) => x !== id);
+        set({ recordingIds: next });
+        if (error) {
+          const rx = get().receivers.find((r) => r.id === id);
+          set({
+            toasts: [
+              ...get().toasts,
+              { key: toastSeq++, ruleName: rx?.label || rx?.url || id, text: error },
+            ],
+          });
+        }
+      }
+    );
     return () => {
       u1();
       u2();
@@ -576,6 +714,7 @@ export const useStore = create<AppState>((set, get) => ({
       u4();
       u5();
       u6();
+      u7();
     };
   },
 }));

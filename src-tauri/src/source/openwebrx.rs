@@ -101,17 +101,28 @@ impl OpenWebRX {
             .await
             .map_err(|e| SourceError(format!("connectionproperties send failed: {e}")))?;
 
-        crate::events::emit_session(app, id, SessionStatus::Live, None);
-
         let mode = cfg.mode.to_lowercase();
         let (low_cut, high_cut) = Self::passband(&mode);
         let mut started = false;
         let mut compression = String::from("adpcm"); // OWRX default
         let mut adpcm = OwrxAdpcm::new();
         let mut center: Option<i64> = None;
+        // Stay Connecting until the first real audio frame is decoded — emitting
+        // Live here would lie about a session that connects but streams no audio.
+        let mut live = false;
+
+        // Keepalive is interleaved into the read loop (not a detached task) so a
+        // session abort tears down both halves immediately — no leaked task or
+        // half-open connection. A WS Ping is always a valid no-op for the server.
+        let mut keepalive = tokio::time::interval(Duration::from_secs(5));
 
         let result = loop {
             tokio::select! {
+                _ = keepalive.tick() => {
+                    if write.send(Message::Ping(Vec::new())).await.is_err() {
+                        break Err(SourceError("keepalive send failed".into()));
+                    }
+                }
                 tuned = tune_rx.recv() => {
                     if let (Some(f), Some(c)) = (tuned, center) {
                         // Live retune: move the demod offset (no reconnect).
@@ -186,6 +197,11 @@ impl OpenWebRX {
                         continue;
                     }
                     let samples: Vec<f32> = pcm_i16.iter().map(|&s| s as f32 / 32768.0).collect();
+                    if !live {
+                        // First real audio frame: only now is the session truly Live.
+                        crate::events::emit_session(app, id, SessionStatus::Live, None);
+                        live = true;
+                    }
                     let ts_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_millis() as i64)

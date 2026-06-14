@@ -15,11 +15,14 @@ pub struct Resampler16k {
     inner: Option<SincFixedIn<f32>>,
     from_sr: u32,
     in_buf: Vec<f32>,
+    // Reusable scratch for the per-block drain, to avoid a heap alloc each block
+    // in this realtime path. Reset before each use.
+    block: Vec<f32>,
 }
 
 impl Resampler16k {
     pub fn new() -> Self {
-        Self { inner: None, from_sr: 0, in_buf: Vec::new() }
+        Self { inner: None, from_sr: 0, in_buf: Vec::new(), block: Vec::with_capacity(BLOCK) }
     }
 
     fn ensure(&mut self, from_sr: u32) {
@@ -47,7 +50,9 @@ impl Resampler16k {
     }
 
     /// Feed input at `from_sr`; returns 16 kHz samples that are ready. Some input
-    /// may remain buffered until a full block accumulates.
+    /// may remain buffered until a full block accumulates. A mid-stream change of
+    /// `from_sr` resets filter state and discards any sub-block remnant from the
+    /// previous rate (it cannot be flushed through `SincFixedIn`'s fixed block).
     pub fn process(&mut self, samples: &[f32], from_sr: u32) -> Vec<f32> {
         self.ensure(from_sr);
         if self.inner.is_none() {
@@ -58,11 +63,18 @@ impl Resampler16k {
 
         let mut out = Vec::new();
         while self.in_buf.len() >= BLOCK {
-            let block: Vec<f32> = self.in_buf.drain(..BLOCK).collect();
+            // Reuse `block` across iterations to avoid a per-block heap alloc.
+            let mut block = std::mem::take(&mut self.block);
+            block.clear();
+            block.extend(self.in_buf.drain(..BLOCK));
             let r = self.inner.as_mut().unwrap();
-            if let Ok(res) = r.process(&[block], None) {
-                out.extend_from_slice(&res[0]);
+            match r.process(&[&block], None) {
+                Ok(res) => out.extend_from_slice(&res[0]),
+                // Surface the failure rather than silently dropping audio: a lost
+                // block becomes an audible dropout downstream, so it must be visible.
+                Err(e) => eprintln!("resample: process failed, dropping {BLOCK}-sample block: {e}"),
             }
+            self.block = block;
         }
         out
     }

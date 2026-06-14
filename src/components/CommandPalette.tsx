@@ -35,7 +35,7 @@ export function CommandPalette() {
     for (const r of receivers)
       list.push({ group: "Jump to receiver", label: r.label || r.url, hint: formatFreq(r.freq_hz), run: () => { setActive(r.id); close(); } });
     for (const b of bookmarks)
-      list.push({ group: "Tune bookmark", label: b.label, hint: formatFreq(b.freq_hz), run: () => { applyBookmark(b); close(); } });
+      list.push({ group: "Tune bookmark", label: b.label, hint: formatFreq(b.freq_hz), run: async () => { close(); await applyBookmark(b); } });
     return list;
   }, [receivers, bookmarks, activeId, setOpen, openAdd, setSettingsOpen, setActive, applyBookmark, togglePlay]);
 

@@ -63,7 +63,11 @@ export function SettingsModal() {
               min={1}
               max={8}
               value={settings.asr_worker_count}
-              onChange={(e) => setSettings({ ...settings, asr_worker_count: Number(e.target.value) })}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                const clamped = Number.isFinite(n) ? Math.max(1, Math.min(8, n)) : 1;
+                setSettings({ ...settings, asr_worker_count: clamped });
+              }}
             />
             <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
               Parallel Whisper transcription workers.

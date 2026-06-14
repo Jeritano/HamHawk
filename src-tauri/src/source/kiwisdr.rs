@@ -39,7 +39,7 @@ impl KiwiSDR {
     /// Normalize a user-supplied base URL into a `ws://`/`wss://` origin.
     fn ws_origin(&self) -> String {
         let u = self.url.trim().trim_end_matches('/');
-        if let Some(rest) = u.strip_prefix("https://") {
+        let with_scheme = if let Some(rest) = u.strip_prefix("https://") {
             format!("wss://{rest}")
         } else if let Some(rest) = u.strip_prefix("http://") {
             format!("ws://{rest}")
@@ -47,6 +47,27 @@ impl KiwiSDR {
             u.to_string()
         } else {
             format!("ws://{u}")
+        };
+        // KiwiSDR servers listen on 8073. If the URL omits the port (common with
+        // `*.proxy.kiwisdr.com` entries), add it — otherwise the WS dials the
+        // scheme default (80/443), the node isn't there, and the session just
+        // loops connecting -> reconnecting forever.
+        Self::ensure_port(&with_scheme, 8073)
+    }
+
+    /// Append `:default` if the URL's authority has no explicit port. Leaves
+    /// IPv6 literals and already-ported URLs untouched. Assumes a base URL with
+    /// no path component (which is how receiver URLs are stored).
+    fn ensure_port(ws_url: &str, default: u16) -> String {
+        match ws_url.split_once("://") {
+            Some((scheme, authority))
+                if !authority.is_empty()
+                    && !authority.starts_with('[')
+                    && !authority.contains(':') =>
+            {
+                format!("{scheme}://{authority}:{default}")
+            }
+            _ => ws_url.to_string(),
         }
     }
 
@@ -113,7 +134,10 @@ impl KiwiSDR {
                 .map_err(|e| SourceError(format!("config send failed: {e}")))?;
         }
 
-        on_live();
+        // Live is signaled on the FIRST real audio frame, not here — sending the
+        // config doesn't mean the server accepted it. A rejected config (badp=1,
+        // too_busy) or a silent node would otherwise show "Live" with no audio.
+        let mut live_signaled = false;
 
         // Keepalive is interleaved into the read loop (not a detached task) so a
         // session abort tears down both read + write halves immediately — no
@@ -156,6 +180,12 @@ impl KiwiSDR {
                             });
 
                             let pcm = adpcm.decode(&buf[10..]);
+                            // Audio is flowing — definitely Live (if the MSG path
+                            // below didn't already mark it).
+                            if !live_signaled {
+                                on_live();
+                                live_signaled = true;
+                            }
                             let ts_ms = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .map(|d| d.as_millis() as i64)
@@ -175,6 +205,15 @@ impl KiwiSDR {
                             if text.contains("too_busy") {
                                 break Err(SourceError("server full (too_busy)".into()));
                             }
+                            // Server accepted the connection and is talking (not a
+                            // rejection) — the link is up, so mark Live now rather
+                            // than waiting for the first audio frame. Meters/spectrum
+                            // still only move on real data, so a silent frequency
+                            // shows Live with a flat meter (honest, no fabrication).
+                            if !live_signaled {
+                                on_live();
+                                live_signaled = true;
+                            }
                         }
                     }
                     Some(Ok(Message::Close(_))) => break Err(SourceError("connection closed".into())),
@@ -192,6 +231,30 @@ impl KiwiSDR {
 // Silence unused-type warnings for the WS stream alias on some platforms.
 #[allow(dead_code)]
 type KiwiWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn origin(url: &str) -> String {
+        KiwiSDR::new(url).ws_origin()
+    }
+
+    #[test]
+    fn port_less_url_defaults_to_8073() {
+        // The bug: proxy URLs without a port dialed ws default 80 and looped.
+        assert_eq!(origin("http://w3ilt.proxy.kiwisdr.com"), "ws://w3ilt.proxy.kiwisdr.com:8073");
+        assert_eq!(origin("w3ilt.proxy.kiwisdr.com"), "ws://w3ilt.proxy.kiwisdr.com:8073");
+        assert_eq!(origin("https://example.com/"), "wss://example.com:8073");
+    }
+
+    #[test]
+    fn explicit_port_is_preserved() {
+        assert_eq!(origin("http://kphsdr.com:8073"), "ws://kphsdr.com:8073");
+        assert_eq!(origin("http://wessex.zapto.org:8074"), "ws://wessex.zapto.org:8074");
+        assert_eq!(origin("ws://host:9000"), "ws://host:9000");
+    }
+}
 
 #[cfg(test)]
 mod live_tests {
@@ -239,4 +302,5 @@ mod live_tests {
         println!("LIVE result: {res:?}  frames={frames} samples={samples}");
         assert!(frames > 0, "no audio frames from live KiwiSDR ({res:?})");
     }
+
 }

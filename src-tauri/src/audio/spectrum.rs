@@ -13,19 +13,32 @@ pub struct Spectrogram {
     n_bins: usize,
     buf: Vec<f32>,
     window: Vec<f32>,
+    scratch: Vec<Complex<f32>>,
 }
 
 impl Spectrogram {
     pub fn new(size: usize, n_bins: usize) -> Self {
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(size);
+        // Hann window. Guard size < 2 to avoid divide-by-zero (size - 1 == 0).
+        let denom = (size as f32 - 1.0).max(1.0);
         let window = (0..size)
             .map(|i| {
-                let x = 2.0 * std::f32::consts::PI * i as f32 / (size as f32 - 1.0);
+                let x = 2.0 * std::f32::consts::PI * i as f32 / denom;
                 0.5 - 0.5 * x.cos() // Hann
             })
             .collect();
-        Self { fft, size, n_bins, buf: Vec::with_capacity(size * 2), window }
+        // Cap n_bins at the usable half-spectrum so we never emit silent
+        // out-of-range zero bins (fabricated data).
+        let n_bins = n_bins.min((size / 2).max(1));
+        Self {
+            fft,
+            size,
+            n_bins,
+            buf: Vec::with_capacity(size * 2),
+            window,
+            scratch: vec![Complex::new(0.0, 0.0); size],
+        }
     }
 
     /// Feed samples; returns one waterfall row each time a full window completes
@@ -33,22 +46,26 @@ impl Spectrogram {
     pub fn push(&mut self, samples: &[f32]) -> Option<Vec<u8>> {
         self.buf.extend_from_slice(samples);
         let mut row = None;
-        while self.buf.len() >= self.size {
-            let mut spectrum: Vec<Complex<f32>> = self
-                .buf
-                .iter()
-                .take(self.size)
-                .zip(self.window.iter())
-                .map(|(&s, &w)| Complex::new(s * w, 0.0))
-                .collect();
-            self.buf.drain(..self.size);
-            self.fft.process(&mut spectrum);
+        let size = self.size;
+        let n_bins = self.n_bins;
+        while self.buf.len() >= size {
+            // Reuse the scratch buffer to avoid a heap allocation per window.
+            for (slot, (&s, &w)) in self
+                .scratch
+                .iter_mut()
+                .zip(self.buf.iter().take(size).zip(self.window.iter()))
+            {
+                *slot = Complex::new(s * w, 0.0);
+            }
+            self.buf.drain(..size);
+            self.fft.process(&mut self.scratch);
+            let spectrum = &self.scratch;
 
             // Use the lower half (real signal) and group into n_bins.
-            let half = self.size / 2;
-            let group = (half / self.n_bins).max(1);
-            let mut bins = Vec::with_capacity(self.n_bins);
-            for b in 0..self.n_bins {
+            let half = size / 2;
+            let group = (half / n_bins).max(1);
+            let mut bins = Vec::with_capacity(n_bins);
+            for b in 0..n_bins {
                 let start = b * group;
                 let end = (start + group).min(half);
                 if start >= end {
@@ -60,6 +77,11 @@ impl Spectrogram {
                     mag += c.norm();
                 }
                 mag /= (end - start) as f32;
+                // Flush denormals to zero: weak/silent signals can produce
+                // subnormal floats that stall the FPU on some CPUs.
+                if mag < 1e-30 {
+                    mag = 0.0;
+                }
                 // Log scale: map roughly [-80, 0] dBFS -> [0, 255].
                 let db = 20.0 * (mag + 1e-6).log10();
                 let v = ((db + 80.0) / 80.0 * 255.0).clamp(0.0, 255.0);

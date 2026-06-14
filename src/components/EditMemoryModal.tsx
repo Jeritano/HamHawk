@@ -36,6 +36,7 @@ export function EditMemoryModal() {
   const nudge = (d: number) => setHz((h) => Math.max(0, h + d));
   const save = () => {
     if (!Number.isFinite(hz)) return; // ignore partial/NaN frequency input
+    if (!url.trim()) return; // a receiver needs a URL; don't silently restore the old one
     updateReceiver({
       ...rx,
       label: label.trim() || undefined,
@@ -43,11 +44,12 @@ export function EditMemoryModal() {
       mode,
       lane,
       kind,
-      url: url.trim() || rx.url,
+      url: url.trim(),
     });
   };
 
-  const mhz = (hz / 1e6).toFixed(5);
+  // Show "—" rather than a fabricated "NaN" while the freq field holds partial input.
+  const mhz = Number.isFinite(hz) ? (hz / 1e6).toFixed(5) : "—";
 
   return (
     <div className="overlay" onClick={() => setEditId(null)}>
@@ -65,7 +67,7 @@ export function EditMemoryModal() {
               className="input"
               type="number"
               step="0.00001"
-              value={mhz}
+              value={Number.isFinite(hz) ? (hz / 1e6).toFixed(5) : ""}
               onChange={(e) => setHz(Math.round(Number(e.target.value) * 1e6))}
             />
             <div className="bandbar" style={{ marginTop: 8 }}>

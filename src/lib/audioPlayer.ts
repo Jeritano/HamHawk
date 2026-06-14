@@ -5,14 +5,21 @@
 // centered (mono to both speakers).
 
 function base64ToInt16(b64: string): Int16Array {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Int16Array(bytes.buffer);
+  // Audio arrives from untrusted public SDR nodes; a malformed chunk must never
+  // crash the audio path. Decode defensively and drop on any failure.
+  try {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    // Int16Array needs an even byte count; truncate a stray trailing byte.
+    const usable = bytes.length - (bytes.length % 2);
+    return new Int16Array(bytes.buffer, 0, usable / 2);
+  } catch {
+    return new Int16Array(0);
+  }
 }
 
 interface Lane {
-  panner: StereoPannerNode;
   nextTime: number;
 }
 
@@ -31,14 +38,26 @@ class AudioPlayer {
     return this.playing;
   }
 
-  start() {
+  /** Create the context if needed (does not start playback). */
+  private ensureCtx() {
     if (!this.ctx) {
       this.ctx = new AudioContext();
       this.master = this.ctx.createGain();
       this.master.gain.value = this.volume;
       this.master.connect(this.ctx.destination);
     }
-    this.ctx.resume();
+    return this.ctx;
+  }
+
+  /** Resume the AudioContext from within a user gesture. WKWebView keeps the
+   *  context suspended until a gesture, and `start()` runs after awaits (gesture
+   *  context lost), so a gesture-time unlock is what actually enables audio. */
+  unlock() {
+    this.ensureCtx().resume();
+  }
+
+  start() {
+    this.ensureCtx().resume();
     this.playing = true;
   }
 
@@ -67,32 +86,28 @@ class AudioPlayer {
   setLanes(mainId: string | null, subId: string | null) {
     this.mainId = mainId;
     this.subId = subId;
-    // Tear down lanes that are no longer routed.
-    for (const [id, lane] of this.lanes) {
-      if (id !== mainId && id !== subId) {
-        lane.panner.disconnect();
-        this.lanes.delete(id);
-      }
+    for (const id of [...this.lanes.keys()]) {
+      if (id !== mainId && id !== subId) this.lanes.delete(id);
     }
-    // Re-pan surviving lanes (e.g. MAIN goes center<->left as SUB appears/clears).
-    for (const [id, lane] of this.lanes) lane.panner.pan.value = this.panFor(id);
   }
 
-  private panFor(id: string): number {
-    if (!this.subId) return 0; // mono: center
-    if (id === this.mainId) return -PAN;
-    if (id === this.subId) return PAN;
-    return 0;
+  /** L/R gains for a receiver. Pan is baked into a stereo buffer (no
+   *  StereoPannerNode — that node renders silent in WKWebView). Equal-power pan. */
+  private gainsFor(id: string): [number, number] {
+    let pan = 0; // center (mono to both) when no SUB
+    if (this.subId) {
+      if (id === this.mainId) pan = -PAN;
+      else if (id === this.subId) pan = PAN;
+    }
+    const a = ((pan + 1) * Math.PI) / 4; // 0..PI/2
+    return [Math.cos(a), Math.sin(a)];
   }
 
   private lane(id: string): Lane | null {
     if (!this.ctx || !this.master) return null;
     let lane = this.lanes.get(id);
     if (!lane) {
-      const panner = this.ctx.createStereoPanner();
-      panner.pan.value = this.panFor(id);
-      panner.connect(this.master);
-      lane = { panner, nextTime: this.ctx.currentTime + 0.12 };
+      lane = { nextTime: this.ctx.currentTime + 0.12 };
       this.lanes.set(id, lane);
     }
     return lane;
@@ -101,18 +116,43 @@ class AudioPlayer {
   push(receiverId: string, b64: string, sampleRate: number) {
     if (!this.playing || !this.ctx) return;
     // Only route the two assigned channels; ignore other running receivers.
-    if (receiverId !== this.mainId && receiverId !== this.subId) return;
+    // Prune any stale lane for an unrouted receiver so the map can't accumulate
+    // orphans when a source stops without setLanes() running.
+    if (receiverId !== this.mainId && receiverId !== this.subId) {
+      this.lanes.delete(receiverId);
+      return;
+    }
     const lane = this.lane(receiverId);
     if (!lane) return;
+    // Guard against a malformed/garbage sample rate (0/NaN -> Infinity ratio).
+    if (!Number.isFinite(sampleRate) || sampleRate < 1000 || sampleRate > 384000) return;
     const i16 = base64ToInt16(b64);
     if (i16.length === 0) return;
-    const f32 = new Float32Array(i16.length);
-    for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
-    const buf = this.ctx.createBuffer(1, f32.length, sampleRate);
-    buf.getChannelData(0).set(f32);
+
+    // Decode to mono float, then resample to the context's native rate. WKWebView
+    // mishandles AudioBuffers declared at a non-context sample rate, so we never
+    // hand it a 12 kHz buffer — we upsample to ctx.sampleRate ourselves.
+    const ctxRate = this.ctx.sampleRate;
+    const ratio = ctxRate / sampleRate;
+    const outLen = Math.max(1, Math.round(i16.length * ratio));
+    const [gl, gr] = this.gainsFor(receiverId);
+    const buf = this.ctx.createBuffer(2, outLen, ctxRate);
+    const L = buf.getChannelData(0);
+    const R = buf.getChannelData(1);
+    const posStep = 1 / ratio; // precompute; avoid a divide per output sample
+    let srcPos = 0;
+    for (let i = 0; i < outLen; i++, srcPos += posStep) {
+      const i0 = Math.floor(srcPos);
+      const i1 = Math.min(i0 + 1, i16.length - 1);
+      const frac = srcPos - i0;
+      const s = (i16[i0] + (i16[i1] - i16[i0]) * frac) / 32768; // linear interp
+      L[i] = s * gl;
+      R[i] = s * gr;
+    }
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
-    src.connect(lane.panner);
+    src.connect(this.master!);
+
     // Drift guard: if buffered too far ahead (catch-up bursts after a reconnect /
     // source switch), drop the backlog so latency can't grow unbounded.
     if (lane.nextTime - this.ctx.currentTime > 0.5) {
@@ -125,3 +165,23 @@ class AudioPlayer {
 }
 
 export const audioPlayer = new AudioPlayer();
+
+// Unlock the AudioContext on the first user gestures. Resuming an already-running
+// context is a no-op, so leaving these attached is harmless. The listeners are
+// kept removable (see disposeAudioPlayer) so HMR / unmount doesn't duplicate them.
+let removeGestureListeners: (() => void) | null = null;
+if (typeof window !== "undefined") {
+  const unlock = () => audioPlayer.unlock();
+  window.addEventListener("pointerdown", unlock);
+  window.addEventListener("keydown", unlock);
+  removeGestureListeners = () => {
+    window.removeEventListener("pointerdown", unlock);
+    window.removeEventListener("keydown", unlock);
+  };
+}
+
+/** Detach the gesture-unlock listeners. Call from an unmount/HMR cleanup. */
+export function disposeAudioPlayer() {
+  removeGestureListeners?.();
+  removeGestureListeners = null;
+}

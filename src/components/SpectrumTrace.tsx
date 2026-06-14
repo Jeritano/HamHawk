@@ -26,11 +26,16 @@ export function SpectrumTrace({ id }: { id: string }) {
     ro.observe(canvas);
 
     let peaks: Float32Array | null = null;
+    // scratch y-value buffers (per-x), reused across frames; resized only on w change
+    let peakY: Float32Array | null = null;
+    let liveY: Float32Array | null = null;
 
     const off = spectrumBus.on(id, (bins) => {
       if (w < 2 || h < 2 || !bins.length) return;
       const n = bins.length;
       if (!peaks || peaks.length !== n) peaks = new Float32Array(n);
+      if (!peakY || peakY.length !== w) peakY = new Float32Array(w);
+      if (!liveY || liveY.length !== w) liveY = new Float32Array(w);
 
       ctx.fillStyle = "#02100c";
       ctx.fillRect(0, 0, w, h);
@@ -60,10 +65,15 @@ export function SpectrumTrace({ id }: { id: string }) {
         const v = bins[i] | 0;
         peaks[i] = Math.max(v, peaks[i] * 0.97);
       }
+      // precompute per-x y-values once (peak + live), reused across the draws below
+      for (let x = 0; x < w; x++) {
+        const i = Math.floor((x / w) * n);
+        peakY[x] = yOf(peaks[i]);
+        liveY[x] = yOf(bins[i] | 0);
+      }
       ctx.beginPath();
       for (let x = 0; x < w; x++) {
-        const v = peaks[Math.floor((x / w) * n)];
-        const y = yOf(v);
+        const y = peakY[x];
         if (x === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
@@ -75,7 +85,7 @@ export function SpectrumTrace({ id }: { id: string }) {
       ctx.beginPath();
       ctx.moveTo(0, h);
       for (let x = 0; x < w; x++) {
-        ctx.lineTo(x, yOf(bins[Math.floor((x / w) * n)] | 0));
+        ctx.lineTo(x, liveY[x]);
       }
       ctx.lineTo(w, h);
       ctx.closePath();
@@ -83,7 +93,7 @@ export function SpectrumTrace({ id }: { id: string }) {
       ctx.fill();
       ctx.beginPath();
       for (let x = 0; x < w; x++) {
-        const y = yOf(bins[Math.floor((x / w) * n)] | 0);
+        const y = liveY[x];
         if (x === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
