@@ -91,6 +91,17 @@ button { font-family: inherit; color: inherit; cursor: pointer; }
 .rigbtn.on.rec .led { background: var(--red); box-shadow: 0 0 7px var(--red); }
 .rigbtn.power .k { color: var(--green); }
 
+/* split scan button (left = down, right = up) */
+.scanbtn { display: flex; flex-direction: column; gap: 5px; }
+.scan-split { display: flex; gap: 4px; margin-top: 1px; }
+.scan-half {
+  flex: 1; font-size: 10px; font-weight: 800; letter-spacing: .3px; color: var(--label);
+  background: var(--bezel); border: 1px solid #000; border-radius: 5px; padding: 5px 4px;
+}
+.scan-half:hover { color: var(--ink); filter: brightness(1.2); }
+.scan-half.on { color: #06121f; background: var(--amber); border-color: var(--amber); }
+.scan-half:disabled { opacity: .5; cursor: not-allowed; }
+
 /* ===== LCD ===== */
 .lcd {
   display: flex; flex-direction: column; min-height: 0; min-width: 0;
@@ -296,6 +307,11 @@ label.fld { display: block; font-size: 11px; color: var(--label); margin: 0 0 4p
 .rmem-item .nm { font-size: 9.5px; color: var(--label); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rmem-go { font-size: 10px; color: var(--label); width: 16px; text-align: center; border-radius: 4px; }
 .rmem-go:hover { color: var(--teal); background: rgba(42,209,182,.12); }
+.rmem-item.playing { border-color: var(--teal); }
+.rmem-item.onair { border-color: var(--green); box-shadow: 0 0 0 1px rgba(70,224,138,.5); background: #07291f; }
+.onair-tag { font-size: 8px; font-weight: 800; color: #06121f; background: var(--green); border-radius: 4px; padding: 1px 4px; letter-spacing: .4px; }
+.lband.on { border-color: var(--teal); box-shadow: 0 0 0 1px rgba(42,209,182,.45); background: #07291f; opacity: 1; }
+.lband.on .bn { color: var(--teal); }
 
 /* left-rail scrollable BANDS browser */
 .lbands { display: flex; flex-direction: column; min-height: 0; flex: 1; margin-top: 8px; }

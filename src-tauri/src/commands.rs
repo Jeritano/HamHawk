@@ -1,4 +1,4 @@
-use crate::model::{AlertHit, AlertRule, Bookmark, Lane, ReceiverConfig, Settings, TranscriptRow};
+use crate::model::{AlertHit, AlertRule, Bookmark, Lane, ReceiverConfig, ReceiverKind, Settings, TranscriptRow};
 use crate::orchestrator::Orchestrator;
 use tauri::State;
 
@@ -7,6 +7,11 @@ pub fn add_receiver(
     orchestrator: State<'_, Orchestrator>,
     cfg: ReceiverConfig,
 ) -> Result<ReceiverConfig, String> {
+    // Feeds are internet streams (no SDR mode to validate).
+    if matches!(cfg.kind, ReceiverKind::Feed) {
+        orchestrator.add_receiver(cfg.clone())?;
+        return Ok(cfg);
+    }
     // Validate mode based on lane
     match (&cfg.lane, cfg.mode.as_str()) {
         (Lane::Voice, mode) => {

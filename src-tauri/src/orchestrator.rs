@@ -11,6 +11,7 @@ use crate::model::{
     AlertHit, AlertRule, AudioChunk, Bookmark, Lane, ReceiverConfig, ReceiverKind, Settings,
     SpectrumFrame, TelemetryFrame as ModelTelemetry, TranscriptRow,
 };
+use crate::source::feed::FeedSource;
 use crate::source::kiwisdr::KiwiSDR;
 use crate::source::openwebrx::OpenWebRX;
 use crate::source::{AudioFrame, TelemetryFrame as SourceTelemetry};
@@ -141,8 +142,11 @@ impl Orchestrator {
 
     pub fn start_receiver(&self, id: &str) -> Result<(), String> {
         let cfg = self.get_config(id)?;
-        if !matches!(cfg.kind, ReceiverKind::Kiwisdr | ReceiverKind::Openwebrx) {
-            return Err("only KiwiSDR and OpenWebRX are supported".into());
+        if !matches!(
+            cfg.kind,
+            ReceiverKind::Kiwisdr | ReceiverKind::Openwebrx | ReceiverKind::Feed
+        ) {
+            return Err("unsupported source".into());
         }
         // Concurrency cap (restarting an already-running one is always allowed).
         {
@@ -475,6 +479,11 @@ async fn source_loop(
                     .run(audio_tx.clone(), telem_tx.clone(), &app, &id, &mut tune_rx)
                     .await
             }
+            ReceiverKind::Feed => {
+                FeedSource::new(&cfg.url)
+                    .run(audio_tx.clone(), telem_tx.clone(), &app, &id)
+                    .await
+            }
         };
         match result {
             Ok(()) => {
@@ -744,6 +753,7 @@ fn kind_str(k: &ReceiverKind) -> &'static str {
     match k {
         ReceiverKind::Kiwisdr => "kiwisdr",
         ReceiverKind::Openwebrx => "openwebrx",
+        ReceiverKind::Feed => "feed",
     }
 }
 
@@ -757,6 +767,7 @@ fn lane_str(l: &Lane) -> &'static str {
 fn parse_kind(s: &str) -> ReceiverKind {
     match s {
         "kiwisdr" => ReceiverKind::Kiwisdr,
+        "feed" => ReceiverKind::Feed,
         _ => ReceiverKind::Openwebrx,
     }
 }

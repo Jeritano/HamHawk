@@ -24,17 +24,15 @@ export function Rig() {
   const sessionStatus = useStore((s) => s.sessionStatus);
   const monitoredId = useStore((s) => s.monitoredId);
   const recordingIds = useStore((s) => s.recordingIds);
-  const setActive = useStore((s) => s.setActive);
   const setEditId = useStore((s) => s.setEditId);
-  const startReceiver = useStore((s) => s.startReceiver);
-  const stopReceiver = useStore((s) => s.stopReceiver);
-  const setMonitor = useStore((s) => s.setMonitor);
+  const togglePlay = useStore((s) => s.togglePlay);
   const toggleRecording = useStore((s) => s.toggleRecording);
-  const setAddOpen = useStore((s) => s.setAddOpen);
+  const openAdd = useStore((s) => s.openAdd);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const setPaletteOpen = useStore((s) => s.setPaletteOpen);
   const tune = useStore((s) => s.tune);
   const scanning = useStore((s) => s.scanning);
+  const scanDir = useStore((s) => s.scanDir);
   const startScan = useStore((s) => s.startScan);
   const stopScan = useStore((s) => s.stopScan);
   const squelch = useStore((s) => s.squelch);
@@ -64,7 +62,6 @@ export function Rig() {
   const sub =
     monitoredId && monitoredId !== activeId ? receivers.find((r) => r.id === monitoredId) || null : null;
   const mainStatus = main ? sessionStatus[main.id] ?? "stopped" : "stopped";
-  const listening = main ? monitoredId === main.id : false;
   const recording = main ? recordingIds.includes(main.id) : false;
 
   const stepLabel = step < 1000 ? `${step} Hz` : `${step / 1000} kHz`;
@@ -91,22 +88,34 @@ export function Rig() {
             <div className="k">POWER</div>
             <div className="v">on</div>
           </div>
-          <button
-            className={"rigbtn" + (listening ? " on" : "")}
-            disabled={!main || main.lane !== "voice"}
-            onClick={async () => {
-              if (!main) return;
-              if (listening) setMonitor(null);
-              else {
-                if (mainStatus !== "live" && mainStatus !== "connecting") await startReceiver(main.id);
-                setMonitor(main.id);
-              }
-            }}
-          >
+          <div className={"rigbtn scanbtn warn" + (scanning ? " on" : "")}>
             <div className="led" />
-            <div className="k">LISTEN</div>
-            <div className="v">{listening ? "on" : "af"}</div>
-          </button>
+            <div className="k">{scanning ? "SCANNING" : "SCAN"}</div>
+            <div className="scan-split">
+              <button
+                className={"scan-half" + (scanning && scanDir < 0 ? " on" : "")}
+                disabled={!main}
+                title="Scan down"
+                onClick={() => {
+                  if (!main) return;
+                  scanning && scanDir < 0 ? stopScan() : startScan(main.id, -1);
+                }}
+              >
+                ◀ DN
+              </button>
+              <button
+                className={"scan-half" + (scanning && scanDir > 0 ? " on" : "")}
+                disabled={!main}
+                title="Scan up"
+                onClick={() => {
+                  if (!main) return;
+                  scanning && scanDir > 0 ? stopScan() : startScan(main.id, 1);
+                }}
+              >
+                UP ▶
+              </button>
+            </div>
+          </div>
           <button
             className={"rigbtn rec" + (recording ? " on" : "")}
             disabled={!main}
@@ -116,32 +125,7 @@ export function Rig() {
             <div className="k">REC</div>
             <div className="v">wav</div>
           </button>
-          <button
-            className={"rigbtn warn" + (mainStatus === "live" || mainStatus === "connecting" ? " on" : "")}
-            disabled={!main}
-            onClick={() => {
-              if (!main) return;
-              if (mainStatus === "stopped") startReceiver(main.id);
-              else stopReceiver(main.id);
-            }}
-          >
-            <div className="led" />
-            <div className="k">{mainStatus === "stopped" ? "START" : "STOP"}</div>
-            <div className="v">rx</div>
-          </button>
-          <button
-            className={"rigbtn warn" + (scanning ? " on" : "")}
-            disabled={!main}
-            onClick={() => {
-              if (!main) return;
-              scanning ? stopScan() : startScan(main.id);
-            }}
-          >
-            <div className="led" />
-            <div className="k">{scanning ? "SCANNING" : "SCAN"}</div>
-            <div className="v">squelch</div>
-          </button>
-          <button className="rigbtn" onClick={() => setAddOpen(true)}>
+          <button className="rigbtn" onClick={() => openAdd("kiwisdr")}>
             <div className="led" />
             <div className="k">ADD</div>
             <div className="v">vfo</div>
@@ -284,13 +268,19 @@ export function Rig() {
                 return (
                   <button
                     key={r.id}
-                    className={"rmem-item" + (activeId === r.id ? " active" : "")}
-                    onClick={() => setActive(r.id)}
+                    className={
+                      "rmem-item" +
+                      (st !== "stopped" ? " playing" : "") +
+                      (monitoredId === r.id ? " onair" : "")
+                    }
+                    title="Click to start + listen · click again to stop"
+                    onClick={() => togglePlay(r.id)}
                   >
                     <div className="r1">
                       <span className={"dot " + st} />
                       <span className="fr">{formatFreq(r.freq_hz)}</span>
                       <span className="spacer" />
+                      {monitoredId === r.id && <span className="onair-tag">ON AIR</span>}
                       <span
                         className="rmem-go"
                         title="Edit / fine-tune"
@@ -300,16 +290,6 @@ export function Rig() {
                         }}
                       >
                         ✎
-                      </span>
-                      <span
-                        className="rmem-go"
-                        title={st === "stopped" ? "Start" : "Stop"}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          st === "stopped" ? startReceiver(r.id) : stopReceiver(r.id);
-                        }}
-                      >
-                        {st === "stopped" ? "▶" : "■"}
                       </span>
                     </div>
                     <div className="nm">{r.label || r.url}</div>

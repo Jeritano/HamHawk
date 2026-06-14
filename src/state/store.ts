@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { spectrumBus, telemetryBus, lastDbm } from "../lib/bus";
 import { audioPlayer } from "../lib/audioPlayer";
 
-export type Kind = "kiwisdr" | "openwebrx";
+export type Kind = "kiwisdr" | "openwebrx" | "feed";
 export type Lane = "voice" | "digital";
 
 export interface ReceiverConfig {
@@ -83,10 +83,12 @@ interface AppState {
   paletteOpen: boolean;
   settingsOpen: boolean;
   addOpen: boolean;
+  addKind: Kind;
   editId: string | null;
   search: string;
   error: string | null;
   scanning: boolean;
+  scanDir: number; // -1 down, +1 up, 0 idle
   squelch: number; // dBm threshold for the scanner
 
   loadAll: () => Promise<void>;
@@ -99,8 +101,10 @@ interface AppState {
   stopReceiver: (id: string) => Promise<void>;
   tune: (id: string, freqHz: number) => void;
   setSquelch: (dbm: number) => void;
-  startScan: (id: string) => Promise<void>;
+  startScan: (id: string, dir: number) => Promise<void>;
   stopScan: () => void;
+  togglePlay: (id: string) => Promise<void>;
+  selectBand: (freqHz: number, mode: string) => Promise<void>;
 
   setActive: (id: string | null) => void;
   setView: (v: View) => void;
@@ -108,6 +112,7 @@ interface AppState {
   setPaletteOpen: (b: boolean) => void;
   setSettingsOpen: (b: boolean) => void;
   setAddOpen: (b: boolean) => void;
+  openAdd: (kind?: Kind) => void;
   setSearch: (s: string) => void;
   runSearch: (text: string) => Promise<void>;
 
@@ -147,10 +152,12 @@ export const useStore = create<AppState>((set, get) => ({
   paletteOpen: false,
   settingsOpen: false,
   addOpen: false,
+  addKind: "kiwisdr",
   editId: null,
   search: "",
   error: null,
   scanning: false,
+  scanDir: 0,
   squelch: -90,
 
   loadAll: async () => {
@@ -249,18 +256,24 @@ export const useStore = create<AppState>((set, get) => ({
 
   // Band scan: sweep ±100 kHz around the active VFO in 1 kHz steps via live
   // retune, stopping when the S-meter clears the squelch threshold.
-  startScan: async (id) => {
+  // Directional squelch scan: dir +1 sweeps up, -1 sweeps down, ±100 kHz around
+  // the start, wrapping, stopping when the S-meter clears squelch.
+  startScan: async (id, dir) => {
     const rx = get().receivers.find((r) => r.id === id);
     if (!rx) return;
     const st = get().sessionStatus[id] ?? "stopped";
-    if (st === "stopped") await get().startReceiver(id);
+    if (st === "stopped") {
+      set({ activeId: id });
+      await get().startReceiver(id);
+      await get().setMonitor(id);
+    }
     scanActive = true;
-    set({ scanning: true });
+    set({ scanning: true, scanDir: dir });
 
     const base = rx.freq_hz;
     const lo = Math.max(0, base - 100_000);
     const hi = base + 100_000;
-    const stepHz = 1000;
+    const stepHz = 1000 * (dir < 0 ? -1 : 1);
     let f = base;
     const dwell = 600;
 
@@ -268,7 +281,7 @@ export const useStore = create<AppState>((set, get) => ({
       if (!scanActive) return;
       f += stepHz;
       if (f > hi) f = lo;
-      // optimistic readout + immediate (non-debounced) live retune
+      if (f < lo) f = hi;
       set({ receivers: get().receivers.map((r) => (r.id === id ? { ...r, freq_hz: f } : r)) });
       invoke("tune", { id, freqHz: f }).catch((e) => set({ error: String(e) }));
       setTimeout(() => {
@@ -276,7 +289,7 @@ export const useStore = create<AppState>((set, get) => ({
         const d = lastDbm.get(id);
         if (d != null && d >= get().squelch) {
           scanActive = false;
-          set({ scanning: false }); // stop on signal
+          set({ scanning: false, scanDir: 0 }); // stop on signal
           return;
         }
         tick();
@@ -287,7 +300,46 @@ export const useStore = create<AppState>((set, get) => ({
 
   stopScan: () => {
     scanActive = false;
-    set({ scanning: false });
+    set({ scanning: false, scanDir: 0 });
+  },
+
+  // Item IS the switch: click a memory to start + listen; click again to stop.
+  togglePlay: async (id) => {
+    const running = (get().sessionStatus[id] ?? "stopped") !== "stopped";
+    if (running) {
+      await get().stopReceiver(id); // also clears monitor if it was monitored
+    } else {
+      set({ activeId: id });
+      await get().startReceiver(id);
+      await get().setMonitor(id);
+    }
+  },
+
+  // HF band toggle: apply band to the active VFO + start + listen; clicking the
+  // band you're already on (and playing) stops it.
+  selectBand: async (freqHz, mode) => {
+    const { receivers, activeId, sessionStatus, monitoredId } = get();
+    const active = receivers.find((r) => r.id === activeId) || receivers[0];
+    if (!active) {
+      set({ error: "Add a receiver first, then pick a band" });
+      return;
+    }
+    const running = (sessionStatus[active.id] ?? "stopped") !== "stopped";
+    const onBand = active.freq_hz === freqHz && active.mode === mode;
+    if (running && onBand && monitoredId === active.id) {
+      await get().stopReceiver(active.id); // deselect
+      return;
+    }
+    if (active.mode !== mode) {
+      await get().updateReceiver({ ...active, freq_hz: freqHz, mode }); // restart applies mode
+    } else {
+      get().tune(active.id, freqHz);
+    }
+    if ((get().sessionStatus[active.id] ?? "stopped") === "stopped") {
+      await get().startReceiver(active.id);
+    }
+    await get().setMonitor(active.id);
+    set({ activeId: active.id });
   },
 
   setActive: (id) => set({ activeId: id, view: "workspace" }),
@@ -296,6 +348,7 @@ export const useStore = create<AppState>((set, get) => ({
   setPaletteOpen: (b) => set({ paletteOpen: b }),
   setSettingsOpen: (b) => set({ settingsOpen: b }),
   setAddOpen: (b) => set({ addOpen: b }),
+  openAdd: (kind = "kiwisdr") => set({ addOpen: true, addKind: kind }),
   setSearch: (s) => set({ search: s }),
 
   runSearch: async (text) => {
