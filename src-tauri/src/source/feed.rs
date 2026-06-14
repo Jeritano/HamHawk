@@ -7,8 +7,9 @@
 
 use super::{AudioFrame, SourceError, TelemetryFrame};
 use std::io::{self, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
@@ -34,10 +35,12 @@ impl FeedSource {
         _telem_tx: mpsc::Sender<TelemetryFrame>,
         app: &AppHandle,
         id: &str,
+        cancel: Arc<AtomicBool>,
     ) -> Result<(), SourceError> {
         let (tx, mut rx) = mpsc::channel::<AudioFrame>(64);
         let url = self.url.clone();
-        let decode = tokio::task::spawn_blocking(move || decode_stream(&url, tx));
+        let dcancel = cancel.clone();
+        let decode = tokio::task::spawn_blocking(move || decode_stream(&url, tx, dcancel));
 
         let mut live = false;
         while let Some(frame) = rx.recv().await {
@@ -46,6 +49,7 @@ impl FeedSource {
                 live = true;
             }
             if audio_tx.send(frame).await.is_err() {
+                cancel.store(true, Ordering::Relaxed); // stop the detached decoder/HTTP thread
                 break; // pipeline gone
             }
         }
@@ -99,7 +103,7 @@ impl MediaSource for StreamReader {
     }
 }
 
-fn decode_stream(url: &str, out: mpsc::Sender<AudioFrame>) -> Result<(), SourceError> {
+fn decode_stream(url: &str, out: mpsc::Sender<AudioFrame>, cancel: Arc<AtomicBool>) -> Result<(), SourceError> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .build()
@@ -121,10 +125,14 @@ fn decode_stream(url: &str, out: mpsc::Sender<AudioFrame>) -> Result<(), SourceE
 
     // Background thread pumps HTTP body chunks to the StreamReader.
     let (chunk_tx, chunk_rx) = std_mpsc::channel::<Vec<u8>>();
+    let hcancel = cancel.clone();
     std::thread::spawn(move || {
         let mut resp = resp;
         let mut buf = [0u8; 8192];
         loop {
+            if hcancel.load(Ordering::Relaxed) {
+                break;
+            }
             match resp.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
@@ -160,6 +168,9 @@ fn decode_stream(url: &str, out: mpsc::Sender<AudioFrame>) -> Result<(), SourceE
 
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(_) => return Ok(()), // EOF / read error -> ended
@@ -216,7 +227,8 @@ mod tests {
     async fn live_feed_decodes() {
         let (tx, mut rx) = mpsc::channel::<AudioFrame>(64);
         let url = "https://ice1.somafm.com/groovesalad-128-mp3".to_string();
-        let h = tokio::task::spawn_blocking(move || decode_stream(&url, tx));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let h = tokio::task::spawn_blocking(move || decode_stream(&url, tx, cancel));
         let mut frames = 0usize;
         let mut samples = 0usize;
         let mut rate = 0u32;

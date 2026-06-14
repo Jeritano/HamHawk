@@ -34,7 +34,8 @@ export function EditMemoryModal() {
 
   const modes = lane === "voice" ? VOICE_MODES : DIGITAL_MODES;
   const nudge = (d: number) => setHz((h) => Math.max(0, h + d));
-  const save = () =>
+  const save = () => {
+    if (!Number.isFinite(hz)) return; // ignore partial/NaN frequency input
     updateReceiver({
       ...rx,
       label: label.trim() || undefined,
@@ -44,6 +45,7 @@ export function EditMemoryModal() {
       kind,
       url: url.trim() || rx.url,
     });
+  };
 
   const mhz = (hz / 1e6).toFixed(5);
 
@@ -111,6 +113,7 @@ export function EditMemoryModal() {
               <select className="input" value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
                 <option value="kiwisdr">KiwiSDR</option>
                 <option value="openwebrx">OpenWebRX</option>
+                <option value="feed">Scanner Feed</option>
               </select>
             </div>
             <div>

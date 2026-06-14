@@ -61,6 +61,11 @@ class AudioPlayer {
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
     src.connect(this.gain);
+    // Drift guard: if we've buffered too far ahead (catch-up bursts after a
+    // reconnect / source switch), drop the backlog so latency can't grow unbounded.
+    if (this.nextTime - this.ctx.currentTime > 0.5) {
+      this.nextTime = this.ctx.currentTime + 0.12;
+    }
     const t = Math.max(this.nextTime, this.ctx.currentTime + 0.02);
     src.start(t);
     this.nextTime = t + buf.duration;

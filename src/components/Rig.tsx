@@ -26,6 +26,8 @@ export function Rig() {
   const recordingIds = useStore((s) => s.recordingIds);
   const setEditId = useStore((s) => s.setEditId);
   const togglePlay = useStore((s) => s.togglePlay);
+  const setWatched = useStore((s) => s.setWatched);
+  const stopAll = useStore((s) => s.stopAll);
   const toggleRecording = useStore((s) => s.toggleRecording);
   const openAdd = useStore((s) => s.openAdd);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
@@ -40,33 +42,29 @@ export function Rig() {
 
   const [view, setView] = useState<LcdView>("scope");
   const [vol, setVol] = useState(audioPlayer.getVolume());
-  const [clock, setClock] = useState("");
   const STEPS = [10, 100, 1000, 5000];
   const [stepIdx, setStepIdx] = useState(1); // default 100 Hz
   const step = STEPS[stepIdx];
   const [angle, setAngle] = useState(0);
   const dragY = useRef<number | null>(null);
 
-  useEffect(() => {
-    const tick = () => {
-      const d = new Date();
-      const p = (n: number) => String(n).padStart(2, "0");
-      setClock(`${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`);
-    };
-    tick();
-    const t = setInterval(tick, 1000);
-    return () => clearInterval(t);
-  }, []);
-
   const main = receivers.find((r) => r.id === activeId) || null;
   const sub =
     monitoredId && monitoredId !== activeId ? receivers.find((r) => r.id === monitoredId) || null : null;
   const mainStatus = main ? sessionStatus[main.id] ?? "stopped" : "stopped";
   const recording = main ? recordingIds.includes(main.id) : false;
+  const anyRunning = Object.values(sessionStatus).some((s) => s !== "stopped");
+  const tunable = !!main && main.kind !== "feed";
+
+  // Tell the backend which waterfalls are on screen (only those compute spectrum).
+  const watchIds = view === "scope" ? [main?.id, sub?.id].filter(Boolean).join(",") : "";
+  useEffect(() => {
+    setWatched(watchIds ? watchIds.split(",") : []);
+  }, [watchIds, setWatched]);
 
   const stepLabel = step < 1000 ? `${step} Hz` : `${step / 1000} kHz`;
   const bump = (steps: number) => {
-    if (!main || steps === 0) return;
+    if (!main || !tunable || steps === 0) return; // feeds aren't tunable
     tune(main.id, main.freq_hz + steps * step);
     setAngle((a) => a + steps * 8);
   };
@@ -83,11 +81,15 @@ export function Rig() {
             </div>
           </div>
           <div className="model">HX-1 · HF/VHF SDR MONITOR</div>
-          <div className="rigbtn power">
+          <button
+            className={"rigbtn power" + (anyRunning ? " on" : "")}
+            title={anyRunning ? "Stop all receivers" : "Idle"}
+            onClick={() => anyRunning && stopAll()}
+          >
             <div className="led" />
             <div className="k">POWER</div>
-            <div className="v">on</div>
-          </div>
+            <div className="v">{anyRunning ? "on" : "idle"}</div>
+          </button>
           <div className={"rigbtn scanbtn warn" + (scanning ? " on" : "")}>
             <div className="led" />
             <div className="k">{scanning ? "SCANNING" : "SCAN"}</div>
@@ -151,7 +153,7 @@ export function Rig() {
             {main && <span className="pill">{main.mode.toUpperCase()}</span>}
             <span>{main ? mainStatus.toUpperCase() : "NO VFO"}</span>
             <span className="clock">
-              {clock} <span className="utc">UTC</span>
+              <Clock /> <span className="utc">UTC</span>
             </span>
           </div>
 
@@ -302,6 +304,21 @@ export function Rig() {
       </div>
     </div>
   );
+}
+
+function Clock() {
+  const [t, setT] = useState("");
+  useEffect(() => {
+    const tick = () => {
+      const d = new Date();
+      const p = (n: number) => String(n).padStart(2, "0");
+      setT(`${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`);
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+  return <>{t}</>;
 }
 
 function Vfo({ rx, role }: { rx: ReceiverConfig | null; role: "MAIN" | "SUB" }) {
@@ -490,11 +507,35 @@ function ActivityView() {
 
 function BookmarksView() {
   const bookmarks = useStore((s) => s.bookmarks);
+  const receivers = useStore((s) => s.receivers);
+  const activeId = useStore((s) => s.activeId);
+  const addBookmark = useStore((s) => s.addBookmark);
   const applyBookmark = useStore((s) => s.applyBookmark);
   const removeBookmark = useStore((s) => s.removeBookmark);
+  const active = receivers.find((r) => r.id === activeId);
   return (
     <div className="lcd-data">
-      <div className="section-title"><span>Bookmarks ({bookmarks.length})</span></div>
+      <div className="section-title">
+        <span>Bookmarks ({bookmarks.length})</span>
+        <button
+          className="btn sm primary"
+          disabled={!active}
+          onClick={() =>
+            active &&
+            addBookmark({
+              id: `bm_${Date.now()}`,
+              label: active.label || active.url,
+              kind: active.kind,
+              url: active.url,
+              freq_hz: active.freq_hz,
+              mode: active.mode,
+              lane: active.lane,
+            })
+          }
+        >
+          ★ Save current
+        </button>
+      </div>
       {bookmarks.length === 0 && <div className="faint" style={{ fontSize: 13, padding: 8 }}>None. Save one from a running VFO.</div>}
       {bookmarks.map((b) => (
         <div className="list-row" key={b.id}>

@@ -39,6 +39,7 @@ fn main() {
             commands::list_model_options,
             commands::download_model,
             commands::set_monitor,
+            commands::set_watched,
             commands::start_recording,
             commands::stop_recording,
             commands::recording_ids,

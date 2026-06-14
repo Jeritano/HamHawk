@@ -128,6 +128,11 @@ pub fn set_monitor(orchestrator: State<'_, Orchestrator>, id: Option<String>) {
 }
 
 #[tauri::command]
+pub fn set_watched(orchestrator: State<'_, Orchestrator>, ids: Vec<String>) {
+    orchestrator.set_watched(ids);
+}
+
+#[tauri::command]
 pub fn start_recording(orchestrator: State<'_, Orchestrator>, id: String) {
     orchestrator.start_recording(&id);
 }

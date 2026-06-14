@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::async_runtime::{spawn, JoinHandle};
@@ -31,18 +32,31 @@ struct Session {
     tasks: Vec<JoinHandle<()>>,
     /// Live retune channel into the running source (no reconnect).
     tune_tx: mpsc::Sender<u64>,
+    /// Cancels detached work (feed HTTP thread + decoder) that abort can't reach.
+    cancel: Arc<AtomicBool>,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
         for h in &self.tasks {
             h.abort();
         }
+        // The audio tap is intentionally NOT in `tasks`: it's detached, so when the
+        // aborted source drops its sender the tap drains, finalizes the WAV, and
+        // exits cleanly. Aborting it would corrupt in-progress recordings.
     }
 }
 
 type Alerts = Arc<Mutex<Vec<AlertRule>>>;
 type Modes = Arc<Mutex<HashMap<String, String>>>;
+
+/// The single shared ASR pool: the job sender plus the worker-pool + result-
+/// consumer task handles (so a settings change can tear the old pool down).
+struct AsrPool {
+    job_tx: mpsc::Sender<AsrJob>,
+    handles: Vec<JoinHandle<()>>,
+}
 
 /// Max concurrent running receiver sessions (bounds WS connections + DSP load).
 const MAX_SESSIONS: usize = 8;
@@ -53,13 +67,16 @@ pub struct Orchestrator {
     sessions: Mutex<HashMap<String, Session>>,
     /// Which receiver's audio is streamed to the UI (one at a time).
     monitored: Arc<Mutex<Option<String>>>,
+    /// Receiver ids whose waterfall the UI is showing — only these compute/emit
+    /// spectrum (skips the FFT for off-screen receivers).
+    watched: Arc<Mutex<HashSet<String>>>,
     /// Receiver ids currently being recorded to WAV.
     record_ids: Arc<Mutex<HashSet<String>>>,
     /// Cached, enabled alert rules (kept in sync with the DB).
     alerts: Alerts,
     /// Single shared ASR pool job sender (one Whisper model for ALL receivers).
     /// `None` until first built; rebuilt after a settings change.
-    asr: Mutex<Option<mpsc::Sender<AsrJob>>>,
+    asr: Mutex<Option<AsrPool>>,
     /// receiver_id -> mode, so the shared ASR result consumer can label transcripts.
     modes: Modes,
 }
@@ -73,6 +90,7 @@ impl Orchestrator {
             app,
             sessions: Mutex::new(HashMap::new()),
             monitored: Arc::new(Mutex::new(None)),
+            watched: Arc::new(Mutex::new(HashSet::new())),
             record_ids: Arc::new(Mutex::new(HashSet::new())),
             alerts,
             asr: Mutex::new(None),
@@ -85,24 +103,33 @@ impl Orchestrator {
     /// model is available (transcription disabled).
     fn ensure_asr(&self) -> Option<mpsc::Sender<AsrJob>> {
         let mut guard = self.asr.lock().unwrap();
-        if let Some(tx) = guard.as_ref() {
-            return Some(tx.clone());
+        if let Some(pool) = guard.as_ref() {
+            return Some(pool.job_tx.clone());
         }
         let model = self.resolve_model_path()?;
         let workers = self.settings().asr_worker_count.clamp(1, 8);
         let (job_tx, job_rx) = mpsc::channel::<AsrJob>(128);
         let (res_tx, res_rx) = mpsc::channel::<AsrResult>(128);
-        spawn(asr::run_worker_pool(job_rx, res_tx, workers, model));
-        spawn(global_result_consumer(
+        let h1 = spawn(asr::run_worker_pool(job_rx, res_tx, workers, model));
+        let h2 = spawn(global_result_consumer(
             res_rx,
             self.db.clone(),
             self.app.clone(),
             self.alerts.clone(),
             self.modes.clone(),
         ));
-        *guard = Some(job_tx.clone());
+        *guard = Some(AsrPool { job_tx: job_tx.clone(), handles: vec![h1, h2] });
         log::info!("shared ASR pool started ({workers} workers, one shared model)");
         Some(job_tx)
+    }
+
+    /// Tear down the shared ASR pool (aborts workers + consumer, frees the model).
+    fn clear_asr(&self) {
+        if let Some(pool) = self.asr.lock().unwrap().take() {
+            for h in pool.handles {
+                h.abort();
+            }
+        }
     }
 
     // ---- receiver CRUD ----
@@ -166,6 +193,7 @@ impl Orchestrator {
         let (telem_tx, telem_rx) = mpsc::channel::<SourceTelemetry>(64);
         let (digital_tx, digital_rx) = mpsc::channel::<Vec<crate::digital::DigitalMsg>>(64);
         let (tune_tx, tune_rx) = mpsc::channel::<u64>(8);
+        let cancel = Arc::new(AtomicBool::new(false));
 
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
@@ -175,26 +203,29 @@ impl Orchestrator {
             let cfg = cfg.clone();
             let id = id.to_string();
             let db = self.db.clone();
-            tasks.push(spawn(source_loop(cfg, id, app, raw_tx, telem_tx, tune_rx, db)));
+            let cancel = cancel.clone();
+            tasks.push(spawn(source_loop(cfg, id, app, raw_tx, telem_tx, tune_rx, db, cancel)));
         }
 
         // 2. Tap: spectrum (waterfall) + monitored audio + recording, then forward.
-        {
+        //    Kept out of `tasks` so it self-terminates (and finalizes the WAV).
+        let tap = {
             let app = self.app.clone();
             let id = id.to_string();
             let rec_dir = self.recordings_dir();
             let name = cfg.label.clone().unwrap_or_else(|| cfg.url.clone());
-            tasks.push(spawn(audio_tap(
+            spawn(audio_tap(
                 id,
                 app,
                 raw_rx,
                 pipe_tx,
                 self.monitored.clone(),
+                self.watched.clone(),
                 self.record_ids.clone(),
                 rec_dir,
                 name,
-            )));
-        }
+            ))
+        };
 
         match cfg.lane {
             Lane::Voice => {
@@ -237,10 +268,20 @@ impl Orchestrator {
             tasks.push(spawn(telemetry_consumer(telem_rx, db, app, id)));
         }
 
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), Session { tasks, tune_tx });
+        let mut sessions = self.sessions.lock().unwrap();
+        // Re-check the cap under the lock (guards against concurrent starts racing
+        // past the earlier check).
+        if !sessions.contains_key(id) && sessions.len() >= MAX_SESSIONS {
+            cancel.store(true, Ordering::Relaxed);
+            for h in &tasks {
+                h.abort();
+            }
+            tap.abort();
+            return Err(format!("at the {MAX_SESSIONS}-receiver limit — stop one first"));
+        }
+        // `tap` is dropped here (not stored) → detached; it self-terminates when
+        // the source closes.
+        sessions.insert(id.to_string(), Session { tasks, tune_tx, cancel });
         Ok(())
     }
 
@@ -271,6 +312,11 @@ impl Orchestrator {
 
     pub fn set_monitor(&self, id: Option<String>) {
         *self.monitored.lock().unwrap() = id;
+    }
+
+    /// Set which receivers' waterfalls are on screen (only these emit spectrum).
+    pub fn set_watched(&self, ids: Vec<String>) {
+        *self.watched.lock().unwrap() = ids.into_iter().collect();
     }
 
     pub fn start_recording(&self, id: &str) {
@@ -415,7 +461,7 @@ impl Orchestrator {
         }
         // Drop the shared ASR pool so it rebuilds with the new model/worker count
         // next time a voice receiver starts.
-        *self.asr.lock().unwrap() = None;
+        self.clear_asr();
         Ok(())
     }
 
@@ -443,6 +489,7 @@ fn load_alert_rules(db: &Arc<Db>) -> Vec<AlertRule> {
 
 // ---- background tasks ----
 
+#[allow(clippy::too_many_arguments)]
 async fn source_loop(
     mut cfg: ReceiverConfig,
     id: String,
@@ -451,9 +498,13 @@ async fn source_loop(
     telem_tx: mpsc::Sender<SourceTelemetry>,
     mut tune_rx: mpsc::Receiver<u64>,
     db: Arc<Db>,
+    cancel: Arc<AtomicBool>,
 ) {
     let mut backoff = 1u64;
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         // Pick up any retune that happened while disconnected so reconnects use it.
         if let Some(f) = db.get_receiver_freq(&id) {
             cfg.freq_hz = f;
@@ -481,7 +532,7 @@ async fn source_loop(
             }
             ReceiverKind::Feed => {
                 FeedSource::new(&cfg.url)
-                    .run(audio_tx.clone(), telem_tx.clone(), &app, &id)
+                    .run(audio_tx.clone(), telem_tx.clone(), &app, &id, cancel.clone())
                     .await
             }
         };
@@ -508,6 +559,7 @@ async fn audio_tap(
     mut raw_rx: mpsc::Receiver<AudioFrame>,
     pipe_tx: mpsc::Sender<AudioFrame>,
     monitored: Arc<Mutex<Option<String>>>,
+    watched: Arc<Mutex<HashSet<String>>>,
     record_ids: Arc<Mutex<HashSet<String>>>,
     rec_dir: String,
     name: String,
@@ -516,8 +568,12 @@ async fn audio_tap(
     let mut writer: Option<hound::WavWriter<BufWriter<File>>> = None;
 
     while let Some(frame) = raw_rx.recv().await {
-        if let Some(bins) = sg.push(&frame.samples) {
-            events::emit_spectrum(&app, SpectrumFrame { receiver_id: id.clone(), bins });
+        // Only the on-screen receivers compute + emit a waterfall (skip the FFT
+        // entirely for off-screen ones).
+        if watched.lock().unwrap().contains(&id) {
+            if let Some(bins) = sg.push(&frame.samples) {
+                events::emit_spectrum(&app, SpectrumFrame { receiver_id: id.clone(), bins });
+            }
         }
 
         if monitored.lock().unwrap().as_deref() == Some(id.as_str()) {

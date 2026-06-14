@@ -97,8 +97,9 @@ interface AppState {
   removeReceiver: (id: string) => Promise<void>;
   updateReceiver: (cfg: ReceiverConfig) => Promise<void>;
   setEditId: (id: string | null) => void;
-  startReceiver: (id: string) => Promise<void>;
+  startReceiver: (id: string) => Promise<boolean>;
   stopReceiver: (id: string) => Promise<void>;
+  stopAll: () => Promise<void>;
   tune: (id: string, freqHz: number) => void;
   setSquelch: (dbm: number) => void;
   startScan: (id: string, dir: number) => Promise<void>;
@@ -117,6 +118,7 @@ interface AppState {
   runSearch: (text: string) => Promise<void>;
 
   setMonitor: (id: string | null) => Promise<void>;
+  setWatched: (ids: string[]) => void;
   toggleRecording: (id: string) => Promise<void>;
 
   loadBookmarks: () => Promise<void>;
@@ -135,6 +137,7 @@ interface AppState {
 let toastSeq = 1;
 let tuneTimer: ReturnType<typeof setTimeout> | undefined;
 let scanActive = false; // module-level scan loop flag
+let scanGen = 0; // bumped on every start/stop so stale loops self-cancel
 
 export const useStore = create<AppState>((set, get) => ({
   receivers: [],
@@ -227,8 +230,10 @@ export const useStore = create<AppState>((set, get) => ({
   startReceiver: async (id) => {
     try {
       await invoke("start_receiver", { id });
+      return true;
     } catch (e) {
       set({ error: String(e) });
+      return false;
     }
   },
 
@@ -261,16 +266,30 @@ export const useStore = create<AppState>((set, get) => ({
   startScan: async (id, dir) => {
     const rx = get().receivers.find((r) => r.id === id);
     if (!rx) return;
+    if (rx.kind === "feed") {
+      set({ error: "Scan needs a tunable SDR receiver" });
+      return;
+    }
+    clearTimeout(tuneTimer); // a pending debounced tune would fight the scan
+    // New scan generation — any previously-running scan loop self-cancels.
+    const myGen = ++scanGen;
+    scanActive = true;
     const st = get().sessionStatus[id] ?? "stopped";
     if (st === "stopped") {
       set({ activeId: id });
-      await get().startReceiver(id);
+      const ok = await get().startReceiver(id);
+      if (!ok) {
+        scanActive = false;
+        set({ scanning: false, scanDir: 0 });
+        return;
+      }
       await get().setMonitor(id);
+      if (myGen !== scanGen) return; // superseded while awaiting
     }
-    scanActive = true;
     set({ scanning: true, scanDir: dir });
 
-    const base = rx.freq_hz;
+    // Re-read current freq (so reversing direction continues from here).
+    const base = get().receivers.find((r) => r.id === id)?.freq_hz ?? rx.freq_hz;
     const lo = Math.max(0, base - 100_000);
     const hi = base + 100_000;
     const stepHz = 1000 * (dir < 0 ? -1 : 1);
@@ -278,14 +297,15 @@ export const useStore = create<AppState>((set, get) => ({
     const dwell = 600;
 
     const tick = () => {
-      if (!scanActive) return;
+      if (!scanActive || myGen !== scanGen) return; // stale loop -> stop
       f += stepHz;
       if (f > hi) f = lo;
       if (f < lo) f = hi;
       set({ receivers: get().receivers.map((r) => (r.id === id ? { ...r, freq_hz: f } : r)) });
+      lastDbm.delete(id); // require a FRESH reading at the new freq, not a stale one
       invoke("tune", { id, freqHz: f }).catch((e) => set({ error: String(e) }));
       setTimeout(() => {
-        if (!scanActive) return;
+        if (!scanActive || myGen !== scanGen) return;
         const d = lastDbm.get(id);
         if (d != null && d >= get().squelch) {
           scanActive = false;
@@ -295,12 +315,24 @@ export const useStore = create<AppState>((set, get) => ({
         tick();
       }, dwell);
     };
-    setTimeout(tick, st === "stopped" ? 2600 : 250);
+    setTimeout(() => {
+      if (myGen === scanGen) tick();
+    }, st === "stopped" ? 2600 : 250);
   },
 
   stopScan: () => {
+    scanGen++; // invalidate any running loop
     scanActive = false;
+    clearTimeout(tuneTimer);
     set({ scanning: false, scanDir: 0 });
+  },
+
+  // Stop every running receiver (POWER off).
+  stopAll: async () => {
+    for (const id of Object.keys(get().sessionStatus)) {
+      if ((get().sessionStatus[id] ?? "stopped") !== "stopped") await get().stopReceiver(id);
+    }
+    await get().setMonitor(null);
   },
 
   // Item IS the switch: click a memory to start + listen; click again to stop.
@@ -309,9 +341,11 @@ export const useStore = create<AppState>((set, get) => ({
     if (running) {
       await get().stopReceiver(id); // also clears monitor if it was monitored
     } else {
-      set({ activeId: id });
-      await get().startReceiver(id);
-      await get().setMonitor(id);
+      const ok = await get().startReceiver(id);
+      if (ok) {
+        set({ activeId: id });
+        await get().setMonitor(id);
+      }
     }
   },
 
@@ -324,6 +358,10 @@ export const useStore = create<AppState>((set, get) => ({
       set({ error: "Add a receiver first, then pick a band" });
       return;
     }
+    if (active.kind === "feed") {
+      set({ error: "Bands don't apply to a scanner feed — select an SDR VFO" });
+      return;
+    }
     const running = (sessionStatus[active.id] ?? "stopped") !== "stopped";
     const onBand = active.freq_hz === freqHz && active.mode === mode;
     if (running && onBand && monitoredId === active.id) {
@@ -331,15 +369,18 @@ export const useStore = create<AppState>((set, get) => ({
       return;
     }
     if (active.mode !== mode) {
-      await get().updateReceiver({ ...active, freq_hz: freqHz, mode }); // restart applies mode
+      await get().updateReceiver({ ...active, freq_hz: freqHz, mode }); // upsert + restart-if-running
     } else {
-      get().tune(active.id, freqHz);
+      // immediate (non-debounced) optimistic tune so it doesn't race startReceiver
+      set({ receivers: get().receivers.map((r) => (r.id === active.id ? { ...r, freq_hz: freqHz } : r)) });
+      invoke("tune", { id: active.id, freqHz }).catch((e) => set({ error: String(e) }));
     }
-    if ((get().sessionStatus[active.id] ?? "stopped") === "stopped") {
-      await get().startReceiver(active.id);
+    let ok = (get().sessionStatus[active.id] ?? "stopped") !== "stopped";
+    if (!ok) ok = await get().startReceiver(active.id);
+    if (ok) {
+      await get().setMonitor(active.id);
+      set({ activeId: active.id });
     }
-    await get().setMonitor(active.id);
-    set({ activeId: active.id });
   },
 
   setActive: (id) => set({ activeId: id, view: "workspace" }),
@@ -360,6 +401,10 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (e) {
       set({ error: String(e) });
     }
+  },
+
+  setWatched: (ids) => {
+    invoke("set_watched", { ids }).catch(() => {});
   },
 
   setMonitor: async (id) => {

@@ -15,11 +15,10 @@ export function CommandPalette() {
   const receivers = useStore((s) => s.receivers);
   const bookmarks = useStore((s) => s.bookmarks);
   const setActive = useStore((s) => s.setActive);
-  const setView = useStore((s) => s.setView);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
-  const setAddOpen = useStore((s) => s.setAddOpen);
+  const openAdd = useStore((s) => s.openAdd);
   const applyBookmark = useStore((s) => s.applyBookmark);
-  const setMonitor = useStore((s) => s.setMonitor);
+  const togglePlay = useStore((s) => s.togglePlay);
   const activeId = useStore((s) => s.activeId);
 
   const [q, setQ] = useState("");
@@ -29,18 +28,16 @@ export function CommandPalette() {
   const commands = useMemo<Cmd[]>(() => {
     const close = () => setOpen(false);
     const list: Cmd[] = [
-      { group: "View", label: "Workspace", run: () => { setView("workspace"); close(); } },
-      { group: "View", label: "Matrix (all receivers)", run: () => { setView("matrix"); close(); } },
-      { group: "Action", label: "Add receiver…", run: () => { setAddOpen(true); close(); } },
+      { group: "Action", label: "Add receiver…", run: () => { openAdd("kiwisdr"); close(); } },
       { group: "Action", label: "Settings…", run: () => { setSettingsOpen(true); close(); } },
     ];
-    if (activeId) list.push({ group: "Action", label: "Listen to active receiver", run: () => { setMonitor(activeId); close(); } });
+    if (activeId) list.push({ group: "Action", label: "Start / stop active receiver", run: () => { togglePlay(activeId); close(); } });
     for (const r of receivers)
       list.push({ group: "Jump to receiver", label: r.label || r.url, hint: formatFreq(r.freq_hz), run: () => { setActive(r.id); close(); } });
     for (const b of bookmarks)
       list.push({ group: "Tune bookmark", label: b.label, hint: formatFreq(b.freq_hz), run: () => { applyBookmark(b); close(); } });
     return list;
-  }, [receivers, bookmarks, activeId, setOpen, setView, setAddOpen, setSettingsOpen, setActive, applyBookmark, setMonitor]);
+  }, [receivers, bookmarks, activeId, setOpen, openAdd, setSettingsOpen, setActive, applyBookmark, togglePlay]);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
