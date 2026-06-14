@@ -1,3 +1,5 @@
+import { LAND } from "../lib/worldland";
+
 export interface MapPoint {
   lat: number;
   lon: number;
@@ -10,6 +12,12 @@ const H = 180;
 function proj(lat: number, lon: number): [number, number] {
   return [((lon + 180) / 360) * W, ((90 - lat) / 180) * H];
 }
+
+// Pre-build one SVG path for all continent outlines (equirectangular, matches proj).
+const LAND_PATH = LAND.map((ring) => {
+  const pts = ring.map(([lon, lat]) => `${(lon + 180).toFixed(1)},${(90 - lat).toFixed(1)}`);
+  return "M" + pts[0] + "L" + pts.slice(1).join(" ") + "Z";
+}).join("");
 
 /** Offline equirectangular map: graticule + plotted points (no external tiles). */
 export function WorldMap({ points }: { points: MapPoint[] }) {
@@ -35,6 +43,7 @@ export function WorldMap({ points }: { points: MapPoint[] }) {
           </filter>
         </defs>
         <rect x="0" y="0" width={W} height={H} fill="url(#ocean)" />
+        <path d={LAND_PATH} fill="#16332b" stroke="#2f5e4e" strokeWidth={0.3} />
         {lons.map((l) => {
           const [x] = proj(0, l);
           return <line key={"x" + l} className="grat" x1={x} y1={0} x2={x} y2={H} />;
