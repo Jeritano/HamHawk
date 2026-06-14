@@ -77,6 +77,7 @@ interface AppState {
   toasts: Toast[];
   recordingIds: string[];
   monitoredId: string | null;
+  subId: string | null; // SUB (right channel) receiver for dual receive, or null
   activeId: string | null;
   view: View;
   ctxTab: CtxTab;
@@ -118,6 +119,7 @@ interface AppState {
   runSearch: (text: string) => Promise<void>;
 
   setMonitor: (id: string | null) => Promise<void>;
+  setSub: (id: string | null) => Promise<void>;
   setWatched: (ids: string[]) => void;
   toggleRecording: (id: string) => Promise<void>;
 
@@ -149,6 +151,7 @@ export const useStore = create<AppState>((set, get) => ({
   toasts: [],
   recordingIds: [],
   monitoredId: null,
+  subId: null,
   activeId: null,
   view: "workspace",
   ctxTab: "map",
@@ -241,6 +244,7 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       await invoke("stop_receiver", { id });
       if (get().monitoredId === id) await get().setMonitor(null);
+      if (get().subId === id) await get().setSub(null);
     } catch (e) {
       set({ error: String(e) });
     }
@@ -332,19 +336,22 @@ export const useStore = create<AppState>((set, get) => ({
     for (const id of Object.keys(get().sessionStatus)) {
       if ((get().sessionStatus[id] ?? "stopped") !== "stopped") await get().stopReceiver(id);
     }
+    await get().setSub(null);
     await get().setMonitor(null);
   },
 
-  // Item IS the switch: click a memory to start + listen; click again to stop.
+  // Item IS the switch: click a memory to start + listen on MAIN; click again to
+  // stop. Other receivers keep running (decode/transcribe/record) — this only
+  // changes what you HEAR. Assign a SUB (right channel) via setSub for dual receive.
   togglePlay: async (id) => {
     const running = (get().sessionStatus[id] ?? "stopped") !== "stopped";
-    if (running) {
-      await get().stopReceiver(id); // also clears monitor if it was monitored
+    if (running && get().monitoredId === id) {
+      await get().stopReceiver(id); // hearing it already -> toggle off
     } else {
-      const ok = await get().startReceiver(id);
+      const ok = running || (await get().startReceiver(id));
       if (ok) {
         set({ activeId: id });
-        await get().setMonitor(id);
+        await get().setMonitor(id); // becomes MAIN audio; others keep running
       }
     }
   },
@@ -407,16 +414,44 @@ export const useStore = create<AppState>((set, get) => ({
     invoke("set_watched", { ids }).catch(() => {});
   },
 
+  // MAIN (left) channel. A receiver can't be both MAIN and SUB — assigning it to
+  // MAIN clears it from SUB.
   setMonitor: async (id) => {
     try {
       await invoke("set_monitor", { id });
-      if (id) {
+      set({ monitoredId: id });
+      if (id && get().subId === id) {
+        await invoke("set_monitor_sub", { id: null });
+        set({ subId: null });
+      }
+      const sub = get().subId;
+      audioPlayer.setLanes(id, sub);
+      if (id || sub) {
         audioPlayer.start();
         audioPlayer.reset(); // start the new channel promptly, not behind the old queue
       } else {
         audioPlayer.stop();
       }
-      set({ monitoredId: id });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  // SUB (right) channel for true dual receive. Pass null to clear. Ignored if the
+  // id is already MAIN (can't be both).
+  setSub: async (id) => {
+    try {
+      if (id && id === get().monitoredId) return;
+      await invoke("set_monitor_sub", { id });
+      set({ subId: id });
+      const main = get().monitoredId;
+      audioPlayer.setLanes(main, id);
+      if (main || id) {
+        audioPlayer.start();
+        audioPlayer.reset();
+      } else {
+        audioPlayer.stop();
+      }
     } catch (e) {
       set({ error: String(e) });
     }
@@ -522,9 +557,9 @@ export const useStore = create<AppState>((set, get) => ({
     const u5 = await listen<{ receiver_id: string; sample_rate: number; pcm_b64: string }>(
       "audio",
       (e) => {
-        if (e.payload.receiver_id === get().monitoredId) {
-          audioPlayer.push(e.payload.pcm_b64, e.payload.sample_rate);
-        }
+        // Player routes by receiver_id into MAIN (left) / SUB (right) lanes and
+        // ignores any other id, so just forward every audio chunk.
+        audioPlayer.push(e.payload.receiver_id, e.payload.pcm_b64, e.payload.sample_rate);
       }
     );
     const u6 = await listen<AlertHit>("alert", (e) => {

@@ -92,7 +92,7 @@ mod tests {
         // Feed several blocks of 12 kHz audio; expect ~4/3 as many 16 kHz samples.
         let input = vec![0.1f32; BLOCK * 4];
         let out = r.process(&input, 12000);
-        assert!(out.len() > 0, "expected resampled output");
+        assert!(!out.is_empty(), "expected resampled output");
         // 12k -> 16k is upsampling: more samples out than the blocks consumed.
         assert!(out.len() >= BLOCK * 3);
     }

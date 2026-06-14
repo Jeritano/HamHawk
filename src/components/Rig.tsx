@@ -23,9 +23,12 @@ export function Rig() {
   const activeId = useStore((s) => s.activeId);
   const sessionStatus = useStore((s) => s.sessionStatus);
   const monitoredId = useStore((s) => s.monitoredId);
+  const subId = useStore((s) => s.subId);
+  const setSub = useStore((s) => s.setSub);
   const recordingIds = useStore((s) => s.recordingIds);
   const setEditId = useStore((s) => s.setEditId);
   const togglePlay = useStore((s) => s.togglePlay);
+  const startReceiver = useStore((s) => s.startReceiver);
   const setWatched = useStore((s) => s.setWatched);
   const stopAll = useStore((s) => s.stopAll);
   const toggleRecording = useStore((s) => s.toggleRecording);
@@ -49,8 +52,8 @@ export function Rig() {
   const dragY = useRef<number | null>(null);
 
   const main = receivers.find((r) => r.id === activeId) || null;
-  const sub =
-    monitoredId && monitoredId !== activeId ? receivers.find((r) => r.id === monitoredId) || null : null;
+  // SUB = the receiver assigned to the right channel (dual receive), or null.
+  const sub = receivers.find((r) => r.id === subId) || null;
   const mainStatus = main ? sessionStatus[main.id] ?? "stopped" : "stopped";
   const recording = main ? recordingIds.includes(main.id) : false;
   const anyRunning = Object.values(sessionStatus).some((s) => s !== "stopped");
@@ -61,6 +64,20 @@ export function Rig() {
   useEffect(() => {
     setWatched(watchIds ? watchIds.split(",") : []);
   }, [watchIds, setWatched]);
+
+  // Right-click a memory to assign/clear it as SUB (right channel, dual receive).
+  const toggleSub = async (id: string) => {
+    if (subId === id) {
+      await setSub(null);
+      return;
+    }
+    if (id === monitoredId) return; // can't be both MAIN and SUB
+    if ((sessionStatus[id] ?? "stopped") === "stopped") {
+      const ok = await startReceiver(id);
+      if (!ok) return;
+    }
+    await setSub(id);
+  };
 
   const stepLabel = step < 1000 ? `${step} Hz` : `${step / 1000} kHz`;
   const bump = (steps: number) => {
@@ -118,15 +135,6 @@ export function Rig() {
               </button>
             </div>
           </div>
-          <button
-            className={"rigbtn rec" + (recording ? " on" : "")}
-            disabled={!main}
-            onClick={() => main && toggleRecording(main.id)}
-          >
-            <div className="led" />
-            <div className="k">REC</div>
-            <div className="v">wav</div>
-          </button>
           <button className="rigbtn" onClick={() => openAdd("kiwisdr")}>
             <div className="led" />
             <div className="k">ADD</div>
@@ -203,27 +211,37 @@ export function Rig() {
             <div className="knob-label" style={{ color: "var(--teal)" }}>{stepLabel}</div>
           </div>
           <div className="knobwrap" style={{ marginTop: 6 }}>
-            <div
-              className="knob tune"
-              style={{ transform: `rotate(${angle}deg)`, cursor: "ns-resize", touchAction: "none" }}
-              title="Tuning — drag up/down or scroll to change frequency"
-              onWheel={(e) => bump(e.deltaY > 0 ? -1 : 1)}
-              onPointerDown={(e) => {
-                dragY.current = e.clientY;
-                (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-              }}
-              onPointerMove={(e) => {
-                if (dragY.current == null) return;
-                const dy = dragY.current - e.clientY; // up = increase
-                const steps = Math.trunc(dy / 4);
-                if (steps !== 0) {
-                  bump(steps);
+            <div className="tuneknob">
+              <div
+                className="knob tune"
+                style={{ transform: `rotate(${angle}deg)`, cursor: "ns-resize", touchAction: "none" }}
+                title="Tuning — drag up/down or scroll to change frequency"
+                onWheel={(e) => bump(e.deltaY > 0 ? -1 : 1)}
+                onPointerDown={(e) => {
                   dragY.current = e.clientY;
-                }
-              }}
-              onPointerUp={() => (dragY.current = null)}
-              onPointerCancel={() => (dragY.current = null)}
-            />
+                  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                }}
+                onPointerMove={(e) => {
+                  if (dragY.current == null) return;
+                  const dy = dragY.current - e.clientY; // up = increase
+                  const steps = Math.trunc(dy / 4);
+                  if (steps !== 0) {
+                    bump(steps);
+                    dragY.current = e.clientY;
+                  }
+                }}
+                onPointerUp={() => (dragY.current = null)}
+                onPointerCancel={() => (dragY.current = null)}
+              />
+              <button
+                className={"recbtn" + (recording ? " on" : "")}
+                disabled={!main}
+                title={recording ? "Recording — click to stop" : "Record to WAV"}
+                onClick={() => main && toggleRecording(main.id)}
+              >
+                <span className="recdot" />
+              </button>
+            </div>
             <div className="knob-label">MAIN TUNING</div>
             <div className="knob-label" style={{ color: "var(--teal)" }}>
               {main ? formatFreq(main.freq_hz) : "—"}
@@ -273,16 +291,22 @@ export function Rig() {
                     className={
                       "rmem-item" +
                       (st !== "stopped" ? " playing" : "") +
-                      (monitoredId === r.id ? " onair" : "")
+                      (monitoredId === r.id ? " onair" : "") +
+                      (subId === r.id ? " issub" : "")
                     }
-                    title="Click to start + listen · click again to stop"
+                    title="Click to listen (MAIN) · right-click to set SUB (right channel) · click again to stop"
                     onClick={() => togglePlay(r.id)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      toggleSub(r.id);
+                    }}
                   >
                     <div className="r1">
                       <span className={"dot " + st} />
                       <span className="fr">{formatFreq(r.freq_hz)}</span>
                       <span className="spacer" />
                       {monitoredId === r.id && <span className="onair-tag">ON AIR</span>}
+                      {subId === r.id && <span className="sub-tag">SUB</span>}
                       <span
                         className="rmem-go"
                         title="Edit / fine-tune"
@@ -330,9 +354,15 @@ function Vfo({ rx, role }: { rx: ReceiverConfig | null; role: "MAIN" | "SUB" }) 
           <span className="vfo-name faint">—</span>
         </div>
         <SMeterArc id={"none-" + role} label={role} />
-        <div className="freq dim">
-          0.000.<span className="hz">000</span>
-        </div>
+        {role === "SUB" ? (
+          <div className="freq-sub faint" style={{ textAlign: "center", padding: "6px 0" }}>
+            right-click a memory to assign SUB
+          </div>
+        ) : (
+          <div className="freq dim">
+            0.000.<span className="hz">000</span>
+          </div>
+        )}
       </div>
     );
   }

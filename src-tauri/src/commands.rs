@@ -128,6 +128,11 @@ pub fn set_monitor(orchestrator: State<'_, Orchestrator>, id: Option<String>) {
 }
 
 #[tauri::command]
+pub fn set_monitor_sub(orchestrator: State<'_, Orchestrator>, id: Option<String>) {
+    orchestrator.set_monitor_sub(id);
+}
+
+#[tauri::command]
 pub fn set_watched(orchestrator: State<'_, Orchestrator>, ids: Vec<String>) {
     orchestrator.set_watched(ids);
 }

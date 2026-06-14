@@ -65,8 +65,12 @@ pub struct Orchestrator {
     db: Arc<Db>,
     app: AppHandle,
     sessions: Mutex<HashMap<String, Session>>,
-    /// Which receiver's audio is streamed to the UI (one at a time).
+    /// Which receiver's audio is streamed to the UI as the MAIN (left) channel.
     monitored: Arc<Mutex<Option<String>>>,
+    /// Optional second receiver streamed as the SUB (right) channel — true dual
+    /// receive (IC-7760 style). Both emit `audio` events tagged with receiver_id;
+    /// the UI pans MAIN left / SUB right.
+    monitored_sub: Arc<Mutex<Option<String>>>,
     /// Receiver ids whose waterfall the UI is showing — only these compute/emit
     /// spectrum (skips the FFT for off-screen receivers).
     watched: Arc<Mutex<HashSet<String>>>,
@@ -90,6 +94,7 @@ impl Orchestrator {
             app,
             sessions: Mutex::new(HashMap::new()),
             monitored: Arc::new(Mutex::new(None)),
+            monitored_sub: Arc::new(Mutex::new(None)),
             watched: Arc::new(Mutex::new(HashSet::new())),
             record_ids: Arc::new(Mutex::new(HashSet::new())),
             alerts,
@@ -220,6 +225,7 @@ impl Orchestrator {
                 raw_rx,
                 pipe_tx,
                 self.monitored.clone(),
+                self.monitored_sub.clone(),
                 self.watched.clone(),
                 self.record_ids.clone(),
                 rec_dir,
@@ -312,6 +318,11 @@ impl Orchestrator {
 
     pub fn set_monitor(&self, id: Option<String>) {
         *self.monitored.lock().unwrap() = id;
+    }
+
+    /// Set (or clear) the SUB receiver streamed as the right channel.
+    pub fn set_monitor_sub(&self, id: Option<String>) {
+        *self.monitored_sub.lock().unwrap() = id;
     }
 
     /// Set which receivers' waterfalls are on screen (only these emit spectrum).
@@ -559,6 +570,7 @@ async fn audio_tap(
     mut raw_rx: mpsc::Receiver<AudioFrame>,
     pipe_tx: mpsc::Sender<AudioFrame>,
     monitored: Arc<Mutex<Option<String>>>,
+    monitored_sub: Arc<Mutex<Option<String>>>,
     watched: Arc<Mutex<HashSet<String>>>,
     record_ids: Arc<Mutex<HashSet<String>>>,
     rec_dir: String,
@@ -576,7 +588,9 @@ async fn audio_tap(
             }
         }
 
-        if monitored.lock().unwrap().as_deref() == Some(id.as_str()) {
+        let is_monitored = monitored.lock().unwrap().as_deref() == Some(id.as_str())
+            || monitored_sub.lock().unwrap().as_deref() == Some(id.as_str());
+        if is_monitored {
             let bytes: Vec<u8> = frame
                 .samples
                 .iter()

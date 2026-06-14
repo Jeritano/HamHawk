@@ -25,6 +25,8 @@
 
 > Nothing is faked — every decoder and meter shows real data or nothing at all.
 
+📖 **[User's Manual](USER_MANUAL.md)** — full guide to the rig: dual receive, tuning, scanning, decoders, recording, and more.
+
 ## Build & run
 
 ```bash
