@@ -41,6 +41,8 @@ fn main() {
             commands::set_settings,
             commands::list_model_options,
             commands::download_model,
+            commands::model_status,
+            commands::partial_recordings,
             commands::set_monitor,
             commands::set_monitor_sub,
             commands::set_watched,

@@ -18,3 +18,16 @@ pub struct TelemetryFrame {
 #[derive(Debug, thiserror::Error)]
 #[error("source error: {0}")]
 pub struct SourceError(pub String);
+
+/// Map a HamHawk mode to a valid SDR DEMODULATION mode. Neither KiwiSDR nor
+/// OpenWebRX has an "ft8"/"psk31"/etc. demod — digital lanes are decoded from USB
+/// audio, so those must demodulate as USB and feed the in-app decoder. Shared by
+/// all SDR adapters so the demod mapping can't drift between them.
+pub fn sdr_demod(mode: &str) -> &'static str {
+    match mode {
+        "lsb" => "lsb",
+        "am" | "amn" => "am",
+        "cw" | "cwn" => "cw",
+        _ => "usb", // usb voice + all digital modes
+    }
+}

@@ -172,9 +172,80 @@ pub fn list_model_options() -> Vec<ModelInfo> {
 }
 
 #[tauri::command]
-pub fn download_model(_name: String) -> Result<(), String> {
-    // P1 stub: model download not implemented yet.
-    Err("model download not implemented in P1; place a ggml model at ~/.hamhawk/models/ggml-base.bin or set its path in Settings".into())
+pub fn model_status(orchestrator: State<'_, Orchestrator>) -> crate::model::ModelStatus {
+    orchestrator.model_status()
+}
+
+#[tauri::command]
+pub fn partial_recordings(orchestrator: State<'_, Orchestrator>) -> Vec<String> {
+    orchestrator.partial_recordings()
+}
+
+/// Download the default Whisper model (ggml-base.en) into ~/.hamhawk/models in the
+/// background, emitting `model_dl` progress events. Atomic: writes to a .part file
+/// and renames on success so a partial download can't masquerade as a real model.
+#[tauri::command]
+pub fn download_model(app: tauri::AppHandle) -> Result<(), String> {
+    use crate::store::db::models_dir;
+    let dir = models_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join("ggml-base.bin");
+    if dest.is_file() {
+        return Err("a model is already installed".into());
+    }
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let emit = |recv: u64, total: u64, done: bool, err: Option<String>| {
+            crate::events::emit_model_download(&app, recv, total, done, err);
+        };
+        let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
+        let resp = match reqwest::blocking::Client::builder()
+            .build()
+            .and_then(|c| c.get(url).send())
+        {
+            Ok(r) => r,
+            Err(e) => return emit(0, 0, true, Some(format!("connect failed: {e}"))),
+        };
+        if !resp.status().is_success() {
+            return emit(0, 0, true, Some(format!("HTTP {}", resp.status())));
+        }
+        let total = resp.content_length().unwrap_or(0);
+        let tmp = dir.join("ggml-base.bin.part");
+        let mut file = match std::fs::File::create(&tmp) {
+            Ok(f) => f,
+            Err(e) => return emit(0, total, true, Some(format!("create failed: {e}"))),
+        };
+        let mut resp = resp;
+        let mut buf = [0u8; 65536];
+        let mut received = 0u64;
+        let mut last = 0u64;
+        loop {
+            match resp.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if file.write_all(&buf[..n]).is_err() {
+                        let _ = std::fs::remove_file(&tmp);
+                        return emit(received, total, true, Some("write failed (disk full?)".into()));
+                    }
+                    received += n as u64;
+                    if received - last > 2_000_000 {
+                        last = received;
+                        emit(received, total, false, None);
+                    }
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return emit(received, total, true, Some(format!("download error: {e}")));
+                }
+            }
+        }
+        if std::fs::rename(&tmp, &dest).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return emit(received, total, true, Some("could not finalize model file".into()));
+        }
+        emit(received, total, true, None);
+    });
+    Ok(())
 }
 
 // ---- audio monitor + recording ----

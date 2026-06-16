@@ -68,16 +68,6 @@ impl OpenWebRX {
         }
     }
 
-    /// Map a HamHawk mode to a valid OpenWebRX DEMODULATION mode. OWRX has no
-    /// "ft8"/"psk31"/etc. demod — digital modes are decoded from USB audio.
-    fn sdr_demod(mode: &str) -> &'static str {
-        match mode {
-            "lsb" => "lsb",
-            "am" | "amn" => "am",
-            "cw" | "cwn" => "cw",
-            _ => "usb", // usb voice + all digital modes
-        }
-    }
 
     pub async fn run(
         self,
@@ -115,7 +105,7 @@ impl OpenWebRX {
             .map_err(|e| SourceError(format!("connectionproperties send failed: {e}")))?;
 
         let mode = cfg.mode.to_lowercase();
-        let demod = Self::sdr_demod(&mode); // valid OWRX demod (digital -> usb)
+        let demod = super::sdr_demod(&mode); // valid OWRX demod (digital -> usb)
         let (low_cut, high_cut) = Self::passband(&mode);
         let mut started = false;
         let mut compression = String::from("adpcm"); // OWRX default
@@ -201,7 +191,12 @@ impl OpenWebRX {
                     let pcm_i16: Vec<i16> = if compression == "adpcm" {
                         adpcm.decode_with_sync(payload)
                     } else {
-                        // raw S16LE
+                        // raw S16LE. A truncated frame can leave a trailing odd byte;
+                        // chunks_exact drops it silently, so log it to keep audio gaps
+                        // diagnosable rather than mysterious.
+                        if payload.len() % 2 != 0 {
+                            log::debug!("openwebrx {id}: dropped trailing odd byte in S16LE frame");
+                        }
                         payload
                             .chunks_exact(2)
                             .map(|c| i16::from_le_bytes([c[0], c[1]]))

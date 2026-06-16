@@ -411,3 +411,26 @@ fn build_fts_query(q: &str) -> Option<String> {
         Some(terms.join(" "))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn migrate_adds_columns_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("schema.sql")).unwrap();
+        // Running twice must not error (ALTER guarded by column presence).
+        Db::migrate(&conn).unwrap();
+        Db::migrate(&conn).unwrap();
+        let cols: Vec<String> = {
+            let mut st = conn.prepare("PRAGMA table_info(receiver)").unwrap();
+            let r = st.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            r.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        for c in ["favorite", "antenna", "region"] {
+            assert!(cols.contains(&c.to_string()), "missing column {c}");
+        }
+    }
+}

@@ -77,6 +77,12 @@ export function Rig() {
   const main = receivers.find((r) => r.id === activeId) || null;
   // Filter/RF-gain control is wired only for KiwiSDR (the SET-command protocol).
   const kiwiMain = !!main && main.kind === "kiwisdr";
+  // Memoized favorites-first order so the list isn't re-sorted on every unrelated
+  // re-render (sessionStatus/activeId/transcript churn).
+  const sortedReceivers = useMemo(
+    () => [...receivers].sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite)),
+    [receivers],
+  );
   // SUB = the receiver assigned to the right channel (dual receive), or null.
   const sub = receivers.find((r) => r.id === subId) || null;
   const mainStatus = main ? sessionStatus[main.id] ?? "stopped" : "stopped";
@@ -373,9 +379,7 @@ export function Rig() {
           <div className="rmem">
             <div className="rmem-head">Memory · {receivers.length}</div>
             <div className="rmem-list">
-              {[...receivers]
-                .sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite))
-                .map((r) => {
+              {sortedReceivers.map((r) => {
                   const st = sessionStatus[r.id] ?? "stopped";
                   return (
                     <button
@@ -448,7 +452,10 @@ function Clock() {
   return <>{t}</>;
 }
 
-function Vfo({ rx, role }: { rx: ReceiverConfig | null; role: "MAIN" | "SUB" }) {
+function Vfo({ rx, role, onClear }: { rx: ReceiverConfig | null; role: "MAIN" | "SUB"; onClear?: () => void }) {
+  const id = rx?.id;
+  const status = useStore((s) => (id ? s.sessionStatus[id] : undefined));
+  const reason = useStore((s) => (id ? s.sessionReason[id] : undefined));
   if (!rx) {
     return (
       <div className={"vfo " + role.toLowerCase()}>
@@ -478,8 +485,19 @@ function Vfo({ rx, role }: { rx: ReceiverConfig | null; role: "MAIN" | "SUB" }) 
         <span className="tag fil">FIL2</span>
         <SnrTag id={rx.id} />
         <span className="vfo-name">{rx.label || rx.url}</span>
+        {onClear && (
+          <button className="vfo-clear" title="Clear SUB (stop dual receive)" onClick={onClear}>
+            ✕
+          </button>
+        )}
       </div>
-      <SMeterArc id={rx.id} label={role} />
+      {reason && (status === "reconnecting" || status === "error") && (
+        <div className={"vfo-reason " + status}>
+          {status === "error" ? "✕ " : "⟳ "}
+          {reason}
+        </div>
+      )}
+      <SMeterArc id={rx.id} label={role} kind={rx.kind} />
       <div className="freq">
         {main}.<span className="hz">{hz}</span>
       </div>
@@ -512,7 +530,8 @@ function SnrTag({ id }: { id: string }) {
 /** Adaptive SUB cell: the SUB VFO meter when a SUB (right-channel) receiver is
  *  assigned, otherwise a live recent-decode ribbon so the slot is never dead. */
 function SubCell({ sub }: { sub: ReceiverConfig | null }) {
-  if (sub) return <Vfo rx={sub} role="SUB" />;
+  const setSub = useStore((s) => s.setSub);
+  if (sub) return <Vfo rx={sub} role="SUB" onClear={() => setSub(null)} />;
   return <DecodeRibbon />;
 }
 

@@ -446,3 +446,17 @@ label.fld { display: block; font-size: 11px; color: var(--label); margin: 0 0 4p
 .ribbon-row .rb-grid { color: var(--amber); flex: none; }
 .ribbon-row .rb-txt { color: var(--label); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ribbon-row .rb-snr { color: var(--faint); flex: none; }
+
+/* ===== per-VFO status reason (persists below the name while struggling) ===== */
+.vfo-reason { font-family: var(--mono); font-size: 9.5px; padding: 1px 14px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vfo-reason.reconnecting { color: var(--amber); }
+.vfo-reason.error { color: var(--red); }
+.vfo-clear { margin-left: 6px; font-size: 9px; color: var(--faint); background: var(--bezel); border: 1px solid var(--btn-edge); border-radius: 4px; padding: 0 5px; line-height: 1.6; flex: none; }
+.vfo-clear:hover { color: var(--red); border-color: var(--red); }
+
+/* ===== Whisper model status (Settings) ===== */
+.model-status { font-size: 11px; padding: 2px 8px; border-radius: 5px; font-weight: 700; }
+.model-status.ok { color: #06121f; background: var(--green); }
+.model-status.no { color: var(--amber); border: 1px solid var(--amber); }
+.model-dl-bar { height: 6px; border-radius: 4px; background: #0c0d10; overflow: hidden; margin-top: 6px; }
+.model-dl-bar > div { height: 100%; background: var(--teal); transition: width .2s; }

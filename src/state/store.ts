@@ -81,6 +81,9 @@ interface AppState {
   receivers: ReceiverConfig[];
   transcripts: TranscriptRow[];
   sessionStatus: Record<string, string>;
+  // Last status reason per receiver (why it's reconnecting/errored), persisted
+  // until Live/Stopped so the operator can re-read it — not just a fleeting toast.
+  sessionReason: Record<string, string>;
   bookmarks: Bookmark[];
   alertRules: AlertRule[];
   alertHits: AlertHit[];
@@ -184,6 +187,7 @@ export const useStore = create<AppState>((set, get) => ({
   receivers: [],
   transcripts: [],
   sessionStatus: {},
+  sessionReason: {},
   bookmarks: [],
   alertRules: [],
   alertHits: [],
@@ -211,6 +215,25 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       const rec = await invoke<string[]>("recording_ids");
       set({ recordingIds: rec });
+    } catch {
+      /* ignore */
+    }
+    // Warn about recordings a crash left unfinalized (otherwise they'd silently
+    // be unreadable / get overwritten).
+    try {
+      const partial = await invoke<string[]>("partial_recordings");
+      if (partial.length) {
+        set({
+          toasts: [
+            ...get().toasts,
+            {
+              key: toastSeq++,
+              ruleName: "Incomplete recording",
+              text: `${partial.length} recording(s) may be truncated (app closed mid-record): ${partial.slice(0, 3).join(", ")}${partial.length > 3 ? "…" : ""}`,
+            },
+          ],
+        });
+      }
     } catch {
       /* ignore */
     }
@@ -710,6 +733,7 @@ export const useStore = create<AppState>((set, get) => ({
         const { receiver_id: id, status, reason } = e.payload;
         // Surface WHY a session is struggling — once per reconnect streak, not on
         // every backoff tick — so it isn't a mystery "connecting/reconnecting" loop.
+        // A permanent failure now arrives as status "error" (won't self-recover).
         if (status === "reconnecting" && get().sessionStatus[id] !== "reconnecting") {
           const rx = get().receivers.find((r) => r.id === id);
           const name = rx?.label || rx?.url || id;
@@ -720,7 +744,21 @@ export const useStore = create<AppState>((set, get) => ({
             ],
           });
         }
-        set({ sessionStatus: { ...get().sessionStatus, [id]: status } });
+        if (status === "error" && get().sessionStatus[id] !== "error") {
+          const rx = get().receivers.find((r) => r.id === id);
+          const name = rx?.label || rx?.url || id;
+          set({
+            toasts: [
+              ...get().toasts,
+              { key: toastSeq++, ruleName: name, text: reason ? `Stopped — ${reason}` : "Stopped (error)" },
+            ],
+          });
+        }
+        // Persist the reason while struggling; clear it once Live or cleanly Stopped.
+        const reasonNext = { ...get().sessionReason };
+        if (reason && (status === "reconnecting" || status === "error")) reasonNext[id] = reason;
+        else if (status === "live" || status === "stopped") delete reasonNext[id];
+        set({ sessionStatus: { ...get().sessionStatus, [id]: status }, sessionReason: reasonNext });
       }
     );
     const u4 = await listen<{ receiver_id: string; bins: number[] }>("spectrum", (e) => {

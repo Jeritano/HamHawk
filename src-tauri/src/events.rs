@@ -8,7 +8,6 @@ pub const EVT_SPECTRUM: &str = "spectrum";
 pub const EVT_AUDIO: &str = "audio";
 pub const EVT_ALERT: &str = "alert";
 pub const EVT_RECORDING: &str = "recording";
-#[allow(dead_code)]
 pub const EVT_MODEL_DL: &str = "model_dl";
 
 /// Recording state for a receiver: started (true) / stopped (false), with an
@@ -40,6 +39,18 @@ pub fn emit_telemetry(app: &AppHandle, frame: TelemetryFrame) {
 
 pub fn emit_transcript(app: &AppHandle, row: TranscriptRow) {
     let _ = app.emit(EVT_TRANSCRIPT, row);
+}
+
+/// Whisper-model download progress: bytes received / total (0 if unknown),
+/// `done` when finished (success or failure), `error` set on failure.
+pub fn emit_model_download(app: &AppHandle, received: u64, total: u64, done: bool, error: Option<String>) {
+    let payload = serde_json::json!({
+        "received": received,
+        "total": total,
+        "done": done,
+        "error": error,
+    });
+    let _ = app.emit(EVT_MODEL_DL, payload);
 }
 
 pub fn emit_session(app: &AppHandle, receiver_id: &str, status: SessionStatus, reason: Option<String>) {

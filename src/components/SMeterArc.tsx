@@ -27,8 +27,11 @@ const TICKS: [string, number][] = [
 ];
 
 /** Analog S-meter with ballistic (damped) needle animated via rAF — no React
- *  re-render per telemetry tick. */
-export function SMeterArc({ id, label }: { id: string; label: string }) {
+ *  re-render per telemetry tick. `kind` is used only to show "no meter" for
+ *  sources that never report a signal level (OpenWebRX / scanner feeds) instead
+ *  of a static "-- dBm" that looks like a real-but-zero reading. */
+export function SMeterArc({ id, label, kind }: { id: string; label: string; kind?: string }) {
+  const hasMeter = kind === undefined || kind === "kiwisdr";
   const needle = useRef<SVGGElement>(null);
   const dbmText = useRef<SVGTextElement>(null);
   const target = useRef(angFor(0));
@@ -88,7 +91,7 @@ export function SMeterArc({ id, label }: { id: string; label: string }) {
         <circle cx={CX} cy={CY} r="4.5" fill="#222" />
         <text x="12" y="18" fontSize="11" fill="#444" fontFamily="var(--mono)" fontWeight="700">{label}</text>
         <text ref={dbmText} x="208" y="18" fontSize="11" fill="#444" fontFamily="var(--mono)" textAnchor="end">
-          -- dBm
+          {hasMeter ? "-- dBm" : "no meter"}
         </text>
         {/* glass sheen */}
         <rect x="2" y="2" width="216" height="64" rx="7" fill={`url(#${gid})`} pointerEvents="none" />

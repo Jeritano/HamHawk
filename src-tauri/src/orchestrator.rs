@@ -20,7 +20,6 @@ use base64::Engine as _;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -581,8 +580,12 @@ impl Orchestrator {
 
     fn resolve_model_path(&self) -> Option<String> {
         if let Some(p) = self.settings().whisper_model_path {
-            if Path::new(&p).is_file() {
-                return Some(p);
+            // Canonicalize (resolves symlinks/.. to a real file) and require a
+            // regular file before handing the path to the model loader.
+            if let Ok(rp) = std::fs::canonicalize(&p) {
+                if rp.is_file() {
+                    return Some(rp.to_string_lossy().to_string());
+                }
             }
         }
         let default = models_dir().join("ggml-base.bin");
@@ -590,6 +593,53 @@ impl Orchestrator {
             return Some(default.to_string_lossy().to_string());
         }
         None
+    }
+
+    /// Model availability for the Settings UI (so a voice lane never silently does
+    /// nothing because no model is present).
+    pub fn model_status(&self) -> crate::model::ModelStatus {
+        let default = models_dir().join("ggml-base.bin");
+        let default_path = default.to_string_lossy().to_string();
+        match self.resolve_model_path() {
+            Some(p) => {
+                let source = if p == default_path { "default" } else { "custom" };
+                crate::model::ModelStatus { present: true, path: Some(p), source: source.into(), default_path }
+            }
+            None => crate::model::ModelStatus { present: false, path: None, source: "none".into(), default_path },
+        }
+    }
+
+    /// WAVs in the recordings dir whose RIFF size doesn't match the file size —
+    /// i.e. left unfinalized by a crash. Returns file names so the UI can warn.
+    pub fn partial_recordings(&self) -> Vec<String> {
+        use std::io::Read;
+        let dir = std::path::PathBuf::from(self.recordings_dir());
+        let mut out = Vec::new();
+        let Ok(rd) = std::fs::read_dir(&dir) else { return out };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("wav") {
+                continue;
+            }
+            let Ok(md) = std::fs::metadata(&p) else { continue };
+            let file_len = md.len();
+            if file_len <= 44 {
+                continue; // header-only / empty — not a useful "partial capture"
+            }
+            if let Ok(mut f) = std::fs::File::open(&p) {
+                let mut hdr = [0u8; 8];
+                if f.read_exact(&mut hdr).is_ok() && &hdr[0..4] == b"RIFF" {
+                    let riff = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
+                    // A finalized WAV has riff_size == file_len - 8; a crash leaves 0/mismatch.
+                    if riff + 8 != file_len {
+                        if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                            out.push(n.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
@@ -601,30 +651,41 @@ impl Orchestrator {
 fn find_callsign(text: &str) -> Option<String> {
     for raw in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '/') {
         let tok = raw.trim_matches('/');
-        if tok.len() < 3 || tok.len() > 7 {
+        if tok.len() < 3 || tok.len() > 12 {
             continue;
         }
-        let bytes = tok.as_bytes();
-        let mut letters_pre = 0usize;
-        let mut i = 0usize;
-        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
-            letters_pre += 1;
-            i += 1;
-        }
-        if !(1..=2).contains(&letters_pre) || i >= bytes.len() || !bytes[i].is_ascii_digit() {
-            continue;
-        }
-        i += 1;
-        let mut letters_post = 0usize;
-        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
-            letters_post += 1;
-            i += 1;
-        }
-        if i == bytes.len() && (1..=4).contains(&letters_post) {
+        // A compound call may be PREFIX/CALL or CALL/SUFFIX (e.g. W/ZL2TS, K1ABC/M,
+        // K1ABC/P). Accept the whole token if any '/'-separated part is a valid base
+        // call — so portable/prefixed calls aren't dropped to an empty ADIF field.
+        if tok.split('/').any(is_base_callsign) {
             return Some(tok.to_ascii_uppercase());
         }
     }
     None
+}
+
+/// True for a plain base callsign: 1-2 leading letters, a digit, 1-4 trailing letters.
+fn is_base_callsign(part: &str) -> bool {
+    if part.len() < 3 || part.len() > 7 {
+        return false;
+    }
+    let b = part.as_bytes();
+    let mut i = 0usize;
+    let mut pre = 0usize;
+    while i < b.len() && b[i].is_ascii_alphabetic() {
+        pre += 1;
+        i += 1;
+    }
+    if !(1..=2).contains(&pre) || i >= b.len() || !b[i].is_ascii_digit() {
+        return false;
+    }
+    i += 1;
+    let mut post = 0usize;
+    while i < b.len() && b[i].is_ascii_alphabetic() {
+        post += 1;
+        i += 1;
+    }
+    i == b.len() && (1..=4).contains(&post)
 }
 
 /// Best-effort Maidenhead grid: 2 letters A-R, 2 digits, optional 2 letters a-x.
@@ -789,6 +850,7 @@ async fn source_loop(
             cfg.freq_hz = f;
         }
         events::emit_session(&app, &id, SessionStatus::Connecting, None);
+        let started = Instant::now();
         let result = match cfg.kind {
             ReceiverKind::Kiwisdr => {
                 let app2 = app.clone();
@@ -822,12 +884,37 @@ async fn source_loop(
                 return;
             }
             Err(e) => {
-                events::emit_session(&app, &id, SessionStatus::Reconnecting, Some(e.to_string()));
-                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                let msg = e.to_string();
+                // Permanent failures (bad auth / config) won't fix themselves —
+                // stop looping and surface Error so the operator can act, instead of
+                // silently "reconnecting" forever.
+                if is_permanent_error(&msg) {
+                    events::emit_session(&app, &id, SessionStatus::Error, Some(msg));
+                    return;
+                }
+                // If the session was up for a while before dropping, recover fast
+                // (a brief glitch shouldn't leave us stuck at the 30s cap).
+                if started.elapsed() >= Duration::from_secs(20) {
+                    backoff = 1;
+                }
+                events::emit_session(&app, &id, SessionStatus::Reconnecting, Some(msg));
+                // Jitter avoids synchronized reconnect storms across receivers.
+                let jitter_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as u64)
+                    .unwrap_or(0)
+                    % (backoff * 300 + 1);
+                tokio::time::sleep(Duration::from_secs(backoff) + Duration::from_millis(jitter_ms)).await;
                 backoff = (backoff * 2).min(30);
             }
         }
     }
+}
+
+/// A source error that won't be fixed by retrying (auth/config) — stop reconnecting.
+fn is_permanent_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("authentication rejected") || m.contains("no receiver config") || m.contains("unsupported")
 }
 
 /// Tap between source and lane: emit waterfall rows, stream monitored audio,
@@ -907,13 +994,32 @@ async fn audio_tap(
                 }
             }
             if let Some(w) = writer.as_mut() {
+                // Watch for a mid-recording write failure (disk full / dir removed).
+                // Leaving REC lit while the WAV silently truncates would be dishonest
+                // data loss — stop, finalize what we can, clear REC, and tell the UI.
+                let mut write_err = false;
                 for &s in &frame.samples {
-                    let _ = w.write_sample((s * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                    if w.write_sample((s * 32767.0).clamp(-32768.0, 32767.0) as i16).is_err() {
+                        write_err = true;
+                        break;
+                    }
+                }
+                if write_err {
+                    if let Some(w) = writer.take() {
+                        let _ = w.finalize();
+                    }
+                    record_ids.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                    events::emit_recording(
+                        &app,
+                        &id,
+                        false,
+                        Some("recording stopped — write failed (disk full or folder removed?)".into()),
+                    );
+                    log::error!("recording write failed for {id}; stopped + finalized");
                 }
             }
         } else if let Some(w) = writer.take() {
-            let _ = w.finalize();
-            events::emit_recording(&app, &id, false, None);
+            finalize_recording(&app, &id, w);
         }
 
         if pipe_tx.send(frame).await.is_err() {
@@ -923,9 +1029,20 @@ async fn audio_tap(
     // Session ended (stopped/dropped) while recording: finalize + tell the UI so
     // the REC indicator clears instead of sticking on.
     if let Some(w) = writer.take() {
-        let _ = w.finalize();
+        finalize_recording(&app, &id, w);
         record_ids.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-        events::emit_recording(&app, &id, false, None);
+    }
+}
+
+/// Finalize a WAV and tell the UI; surface a truncation warning if the WAV
+/// header couldn't be written (otherwise the file may be unreadable, silently).
+fn finalize_recording(app: &AppHandle, id: &str, w: hound::WavWriter<BufWriter<File>>) {
+    match w.finalize() {
+        Ok(()) => events::emit_recording(app, id, false, None),
+        Err(e) => {
+            log::error!("recording finalize failed for {id}: {e}");
+            events::emit_recording(app, id, false, Some("recording may be truncated — finalize failed".into()));
+        }
     }
 }
 
@@ -951,6 +1068,14 @@ fn open_wav(dir: &str, name: &str, sample_rate: u32) -> Option<hound::WavWriter<
     {
         log::error!("refusing unsafe recordings dir: {}", dir.display());
         return None;
+    }
+    // Reject a symlinked recordings dir: a symlink could redirect writes outside
+    // the intended root even when the path itself looks clean.
+    if let Ok(md) = std::fs::symlink_metadata(dir) {
+        if md.file_type().is_symlink() {
+            log::error!("refusing symlinked recordings dir: {}", dir.display());
+            return None;
+        }
     }
     if let Err(e) = std::fs::create_dir_all(dir) {
         log::error!("failed to create recordings dir {}: {e}", dir.display());
@@ -1008,7 +1133,10 @@ async fn digital_pipeline(
         "cw" => Box::new(CwDecoder::new(12000)),
         "psk31" => Box::new(PskRttyDecoder::new(PskRttyMode::Psk31, 12000)),
         "rtty" => Box::new(PskRttyDecoder::new(PskRttyMode::Rtty, 12000)),
-        _ => Box::new(CwDecoder::new(12000)),
+        other => {
+            log::warn!("digital lane: unknown mode {other:?} — defaulting to CW decoder");
+            Box::new(CwDecoder::new(12000))
+        }
     };
 
     while let Some(frame) = audio_rx.recv().await {
@@ -1243,5 +1371,92 @@ fn row_to_transcript(r: TranscriptRowTuple) -> TranscriptRow {
         text_native: r.8,
         confidence: r.9,
         snr_db: r.10,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Lane, TranscriptRow};
+
+    #[test]
+    fn callsign_plain_and_portable() {
+        assert_eq!(find_callsign("CQ K1ABC FN42"), Some("K1ABC".into()));
+        assert_eq!(find_callsign("K1ABC/M up 5w"), Some("K1ABC/M".into()));
+        assert_eq!(find_callsign("W/ZL2TS dx"), Some("W/ZL2TS".into()));
+        assert_eq!(find_callsign("no call here"), None);
+    }
+
+    #[test]
+    fn base_callsign_rules() {
+        assert!(is_base_callsign("K1ABC"));
+        assert!(is_base_callsign("DL1XYZ"));
+        assert!(is_base_callsign("W3A"));
+        assert!(!is_base_callsign("ABCDE")); // no digit
+        assert!(!is_base_callsign("12345")); // no leading letter
+    }
+
+    #[test]
+    fn grid_parse() {
+        assert_eq!(find_grid("CQ FN42 K1ABC"), Some("FN42".into()));
+        assert_eq!(find_grid("grid jo62ai here"), Some("JO62ai".into())); // 6-char keeps case
+        assert_eq!(find_grid("nothing 9999"), None);
+    }
+
+    #[test]
+    fn csv_escapes_quotes_commas_newlines() {
+        assert_eq!(csv_escape("plain"), "plain");
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape("he said \"hi\""), "\"he said \"\"hi\"\"\"");
+        assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn permanent_error_classification() {
+        assert!(is_permanent_error("authentication rejected"));
+        assert!(is_permanent_error("no receiver config"));
+        assert!(!is_permanent_error("connection closed"));
+        assert!(!is_permanent_error("connect timed out"));
+        assert!(!is_permanent_error("server full (too_busy)"));
+    }
+
+    fn drow(text: &str) -> TranscriptRow {
+        TranscriptRow {
+            id: 1,
+            receiver_id: "r1".into(),
+            ts_start: 0,
+            ts_end: 0,
+            lane: Lane::Digital,
+            mode: "ft8".into(),
+            src_lang: None,
+            text_en: text.into(),
+            text_native: None,
+            confidence: None,
+            snr_db: Some(-7.0),
+        }
+    }
+
+    #[test]
+    fn adif_has_eoh_and_fields() {
+        let mut meta = HashMap::new();
+        meta.insert("r1".to_string(), (14_074_000u64, "Test".to_string()));
+        let s = export_adif(&[drow("CQ K1ABC FN42")], &meta);
+        assert!(s.contains("<EOH>"));
+        assert!(s.contains("<CALL:5>K1ABC"));
+        assert!(s.contains("<GRIDSQUARE:4>FN42"));
+        assert!(s.contains("<BAND:3>20m"));
+        assert!(s.trim_end().ends_with("<EOR>"));
+    }
+
+    #[test]
+    fn csv_has_header_and_row() {
+        let mut meta = HashMap::new();
+        meta.insert("r1".to_string(), (14_074_000u64, "Test".to_string()));
+        let s = export_csv(&[drow("CQ K1ABC FN42")], &meta);
+        let lines: Vec<&str> = s.lines().collect();
+        assert!(lines[0].starts_with("timestamp_utc,station,freq_mhz"));
+        assert!(lines[1].contains("K1ABC"));
+        assert!(lines[1].contains("FN42"));
+        assert!(lines[1].contains("14.074000"));
     }
 }

@@ -73,6 +73,15 @@ pub struct RadioCtl {
     pub man_gain: Option<i32>,
 }
 
+/// Whether a usable Whisper model is available, and where (for the Settings UI).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelStatus {
+    pub present: bool,
+    pub path: Option<String>,
+    pub source: String, // "default" | "custom" | "none"
+    pub default_path: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub asr_worker_count: u32,

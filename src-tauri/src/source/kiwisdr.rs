@@ -82,19 +82,6 @@ impl KiwiSDR {
         }
     }
 
-    /// Map a HamHawk mode to a valid KiwiSDR DEMODULATION mode. KiwiSDR has no
-    /// "ft8"/"psk31"/etc. demod — the digital lane decodes those from USB audio,
-    /// so they must be demodulated as USB and fed to the in-app decoder. (Sending
-    /// `mod=ft8` is invalid and yields wrong/no audio → the decoder gets nothing.)
-    fn sdr_demod(mode: &str) -> &'static str {
-        match mode {
-            "lsb" => "lsb",
-            "am" | "amn" => "am",
-            "cw" | "cwn" => "cw",
-            // usb voice + all digital modes demod as USB.
-            _ => "usb",
-        }
-    }
 
     /// Connect, configure, and stream until the connection drops or errors.
     /// Emits `SessionStatus::Live` once configured. Returns `Err` on disconnect so
@@ -137,7 +124,7 @@ impl KiwiSDR {
         let mode = cfg.mode.to_lowercase();
         // What we send to the SDR (a valid KiwiSDR demod) vs. the HamHawk mode that
         // selects the in-app decoder. Digital modes demod as USB.
-        let demod = Self::sdr_demod(&mode);
+        let demod = super::sdr_demod(&mode);
         let (mut low_cut, mut high_cut) = Self::passband(&mode);
         let mut agc_on = true;
         let mut man_gain = 50i32;

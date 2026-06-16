@@ -28,7 +28,12 @@ pub async fn run_worker_pool(
     {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            log::error!("failed to load whisper model '{model_path}': {e}; transcription disabled");
+            // Log only the file name, not the full path (avoid leaking fs structure).
+            let name = std::path::Path::new(&model_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("model");
+            log::error!("failed to load whisper model '{name}': {e}; transcription disabled");
             // Drain jobs so the upstream pipeline doesn't stall.
             drop(result_tx);
             while job_rx.recv().await.is_some() {}
