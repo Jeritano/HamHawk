@@ -61,15 +61,21 @@ The window is laid out like a radio face, in three columns:
 ┌──────────────┬───────────────────────────────────────┬──────────────┐
 │  LEFT RAIL   │              CENTER LCD                │  RIGHT KNOBS │
 │              │                                        │              │
-│  POWER       │  MAIN S-meter      SUB S-meter         │  MULTI·STEP  │
-│  SCAN ◀DN UP▶│  MAIN freq         SUB freq            │  MAIN TUNING │
-│  ADD         │  ─────────────────────────────────────│   (REC ⬤)    │
-│  SEARCH ⌘K   │  Scope / Text / Map / Memory / ...     │  AF / VOLUME │
-│  SET         │                                        │  SQUELCH     │
-│              │  [SCOPE][TEXT][MAP][MEMORY][ACTIVITY]   │  MEMORY list │
-│  BANDS list  │  [BMARKS][ALERTS]   (soft-keys)        │  (channels)  │
+│  POWER       │  MAIN S-meter    SUB meter / decodes   │  MULTI·STEP  │
+│  SCAN ◀DN UP▶│  MAIN freq                             │  MAIN TUNING │
+│  SEARCH ⌘K   │  ─────────────────────────────────────│   (REC ⬤)    │
+│  ADD   SET   │  Scope / Text / Map / Log / ...        │  AF / VOLUME │
+│  BEST RX     │                                        │  SQUELCH     │
+│              │  [SCOPE][AF SCOPE][TEXT][MAP]          │  FILTER      │
+│  BANDS list  │  [ACTIVITY][LOG][BMARKS][ALERTS]       │  RF GAIN/AGC │
+│              │              (soft-keys)               │  MEMORY list │
 └──────────────┴───────────────────────────────────────┴──────────────┘
 ```
+
+- **POWER** is a real on/off toggle: off → starts + listens to the selected station; on → stops all.
+- The **SUB cell** (top-right of the LCD) shows the SUB meter when a SUB is assigned, otherwise a live
+  **recent-decode ribbon**.
+- **FILTER** and **RF GAIN / AGC** (right column) appear for KiwiSDR receivers.
 
 - **Left rail** — the main function buttons and a scrollable **Bands** browser.
 - **Center LCD** — twin **MAIN** and **SUB** displays (S-meter + frequency), a large content area that switches between views via the soft-keys along the bottom.
@@ -97,7 +103,7 @@ There are **no Start / Stop / Listen buttons**. The thing you want to hear *is* 
 - **Click it again** → it stops.
 - Starting one station does **not** stop the others — they keep running in the background (decoding, transcribing, recording). Clicking only changes **what you hear**.
 
-**POWER** is the master off-switch: it stops every running receiver at once.
+**POWER** is a master on/off toggle: when idle it powers **on** (starts + listens to the selected, or first, station); when anything is running it powers **off** (stops every receiver at once). The LED and the on/idle label track the state.
 
 ---
 
@@ -111,14 +117,18 @@ HamHawk does **true dual receive**, like an IC-7760: two independent signals at 
 
 **Assign a SUB:**
 
-- **Right-click** any Memory channel → it becomes **SUB** (auto-starting it if it wasn't running). An amber **SUB** tag appears, and the SUB S-meter and scope go live.
-- **Right-click it again** → clears SUB.
+- **Right-click** any Memory channel → it becomes **SUB** (auto-starting it if it wasn't running). An amber **SUB** tag appears, and the SUB meter goes live.
+- **Right-click it again**, or click the **✕** on the SUB cell, → clears SUB.
+
+**The SUB cell adapts:**
+
+- **SUB assigned** → the top-right cell shows a SUB VFO meter (S-meter + frequency + mode/lane + a live **S/N** readout when the signal reports one) with a **✕ clear** button.
+- **No SUB** → the same cell shows a **recent-decode ribbon**: the newest digital decodes (callsign · grid · S/N). Click a row to make MAIN listen to the receiver that heard it. The slot is never dead.
 
 **Rules:**
 
 - A channel can't be both MAIN and SUB. Assigning one clears the other.
-- The SUB pane in the LCD mirrors whatever is assigned to SUB — its meter, frequency, and waterfall track that receiver.
-- **POWER** clears both MAIN and SUB and stops everything.
+- **POWER (off)** clears both MAIN and SUB and stops everything.
 
 > Under the hood, *many* receivers can run at once (decode/transcribe/record). MAIN and SUB are simply the two you've chosen to **hear**.
 
@@ -128,12 +138,22 @@ HamHawk does **true dual receive**, like an IC-7760: two independent signals at 
 
 | Button | What it does |
 | --- | --- |
-| **POWER** | Lit when anything is running. Click to **stop all** receivers. |
+| **POWER** | On/off toggle. Idle → starts + listens to the selected station; running → **stops all**. Lit when on. |
 | **SCAN** | Split button: **◀ DN** scans down, **UP ▶** scans up. See [Scanning](#9-scanning). |
-| **ADD** | Open the **Add receiver** dialog (KiwiSDR / OpenWebRX / scanner feed). |
 | **SEARCH (⌘K)** | Open the command palette to jump to any action or channel. |
-| **SET** | Open **Settings** (Whisper model, recordings folder, ASR workers). |
+| **ADD** | Open the **Add receiver** dialog (KiwiSDR / OpenWebRX / Broadcastify / scanner feed). |
+| **SET** | Open **Settings** (color theme, Whisper model + download, recordings folder, ASR workers). |
+| **BEST RX** | Auto-pick the best KiwiSDR for a band — a curated catalog ranked by real SNR + antenna + region. See [Best receiver](#65-best-receiver-auto-pick). |
 | **BANDS** | A scrollable browser of HF public-service frequencies and reference police bands. |
+
+### 6.5 Best receiver (auto-pick)
+
+**BEST RX** opens a picker of curated **KiwiSDR** nodes pulled from the public registry, ranked by **reported SNR** (higher = clearer) then antenna quality. Choose a **region** and a **band**, then either:
+
+- **⚡ Auto-pick best** — adds & tunes the top-ranked node for that band, or
+- **Add & Tune** on any row — each row shows the node's **antenna**, location, region, and SNR.
+
+The chosen node is added to Memory (with its antenna noted) and starts listening on MAIN. KiwiSDRs are wideband HF, so ranking is by signal quality + antenna, not coverage. The catalog is a point-in-time snapshot — public nodes can be busy or offline.
 
 ---
 
@@ -144,8 +164,10 @@ HamHawk does **true dual receive**, like an IC-7760: two independent signals at 
 - **REC** (round button on the lower-right of the MAIN TUNING knob) — latches in/out to record MAIN to a WAV file. See [Recording](#8-recording).
 - **AF / VOLUME** — playback loudness.
 - **SQUELCH** — the dBm threshold the scanner uses to decide a frequency is "busy."
+- **FILTER** *(KiwiSDR)* — receiver passband width. Narrow to cut adjacent-channel noise, widen for fidelity. Applied live (no reconnect) and preserved across retunes.
+- **RF GAIN / AGC** *(KiwiSDR)* — leftmost = **AGC** (automatic); raise for manual RF gain. The **AGC** button snaps back to automatic.
 
-Feeds (scanner streams) aren't tunable; the tuning controls apply only to SDR VFOs.
+Feeds (scanner streams) aren't tunable, and FILTER / RF GAIN apply only to KiwiSDR VFOs.
 
 ---
 
@@ -178,15 +200,18 @@ The soft-keys along the bottom of the LCD switch the center display:
 
 | Soft-key | Shows |
 | --- | --- |
-| **SCOPE** | Dual spectrum + waterfall for MAIN (and SUB, if assigned). |
+| **SCOPE** | Spectrum + waterfall for MAIN (and SUB, if assigned). |
+| **AF SCOPE** | Audio-scope: live waveform + 0–6 kHz audio spectrum of what you're hearing. |
 | **TEXT** | Live transcripts / decoded text for the MAIN receiver. |
 | **MAP** | World map plotting decoded Maidenhead grid locators. |
-| **MEMORY** | Full memory channel list / management. |
-| **ACTIVITY** | Recent decode & session activity. |
+| **ACTIVITY** | Recent digital-decode activity. |
+| **LOG** | Logbook of decodes/transcripts (callsign · grid · mode · S/N), with **Export ADIF** / **Export CSV**. |
 | **BMARKS** | Saved bookmarks. |
 | **ALERTS** | Keyword alert rules and hits. |
 
-Only on-screen waterfalls compute their FFT, so off-screen receivers don't waste CPU on spectrum.
+Only on-screen waterfalls compute their FFT, so off-screen receivers don't waste CPU on spectrum. The spectrum trace and waterfall keep headroom above strong signals, so peaks show their shape instead of clipping flat at the top.
+
+**Exporting your log:** in **LOG**, **Export ADIF** writes an `.adi` (with parsed CALL / GRIDSQUARE / BAND, digital lane only) and **Export CSV** writes everything (time, station, freq, mode, S/N, callsign, grid, text) to `~/.hamhawk/exports/`. The file opens after export. Callsign/grid are best-effort parses of decoded text — useful for a glance, not authoritative.
 
 ---
 
@@ -196,8 +221,10 @@ The **Memory** list lives in the right column and is scrollable.
 
 - **Click** a channel → listen on **MAIN** (ON AIR tag).
 - **Right-click** a channel → assign as **SUB** (amber SUB tag).
-- **✎ (pencil)** → open the **Edit** dialog to fine-tune that channel's label, frequency, mode, and lane. Changes save immediately; if the channel is running it restarts with the new settings.
-- The colored dot shows session state (stopped / connecting / running).
+- **★ star** → mark a **favorite**; favorites sort to the top of the list for quick access. Click again to unstar.
+- **Antenna line** → channels that carry an antenna description (anything added via **BEST RX**, or with the antenna field filled in **ADD**) show it under the name (📡), so you can pick a station by its antenna.
+- **✎ (pencil)** → open the **Edit** dialog to fine-tune label, frequency, mode, and lane. Changes save immediately; if the channel is running it restarts. Your star and antenna are preserved across edits.
+- The colored dot shows session state (stopped / connecting / running). A struggling receiver shows a reason line under the MAIN/SUB name (⟳ reconnecting / ✕ error) that persists until it recovers.
 
 HamHawk ships seeded with ~20 real public channels (VOLMET aviation weather, time stations, shortwave, etc.).
 
@@ -218,12 +245,13 @@ The **BANDS** list (left rail) has two groups:
 
 - **KiwiSDR** — paste a node URL (host:port). Live-verified path; supports live tuning and the full decode/voice pipeline.
 - **OpenWebRX** — protocol ported from the official client (experimental).
-- **Scanner feed** — an audio **stream URL** (e.g. Broadcastify). Plays and records, but is **not tunable** (it's a fixed stream, not an SDR).
+- **Broadcastify (scanner)** — paste a feed ID or listen-link; HamHawk resolves it to the free public stream.
+- **Scanner feed** — any audio **stream URL** (MP3/AAC). Plays and records, but is **not tunable** (it's a fixed stream, not an SDR).
 
-Set a **label**, **frequency**, **mode** (AM / USB / LSB / etc.), and **lane**:
+Set a **label**, optional **antenna** (shown in Memory so you can pick by antenna), **frequency**, **mode** (AM / USB / LSB / etc.), and **lane**:
 
 - **Voice** — routes audio to the Whisper transcription/translation engine.
-- **Digital** — routes audio to the CW/RTTY/PSK31/FT8 decoders.
+- **Digital** — routes audio to the CW/RTTY/PSK31/FT8 decoders. (Digital modes are demodulated as USB under the hood and fed to the decoder.)
 
 ---
 
@@ -267,8 +295,9 @@ A single shared Whisper context serves **all** receivers; the number of worker t
 
 Open with **SET**:
 
+- **Accessibility — color theme** — choose **Default** or a colorblind-safe palette (Deuteranopia / Protanopia / Tritanopia) or **High contrast**. Applies instantly and is remembered. **Larger controls** bumps button/slider sizes.
+- **Whisper model** — a status row shows **Ready / Not installed**. **Download base model** fetches `ggml-base.en` into `~/.hamhawk/models/` with a progress bar, or **Choose…** points to a model file you already have. The path is also editable directly.
 - **ASR worker count** — Whisper decode threads (trade speed vs. CPU).
-- **Whisper model path** — override the default `~/.hamhawk/models/ggml-base.bin`.
 - **Recordings folder** — where WAV files are written. **Choose** picks a folder; **Reveal** opens the current one in Finder.
 
 ---
@@ -287,9 +316,13 @@ The palette is the fastest way to jump to a channel or run an action without hun
 
 | Symptom | Cause / fix |
 | --- | --- |
-| **No audio when I click a channel** | Check **AF / VOLUME** isn't at zero. Confirm the channel reached *running* (green dot). Public nodes can be full/offline — try another. |
-| **SUB pane stays blank** | You haven't assigned a SUB. **Right-click** a Memory channel to assign one. |
-| **No transcripts** | No Whisper model installed. Place `ggml-base.bin` in `~/.hamhawk/models/` or set the path in Settings. Audio/waterfall still work without it. |
+| **No audio when I click a channel** | Check **AF / VOLUME** isn't at zero and **POWER** is on. Confirm the channel reached *running* (green dot). Public nodes can be full/offline — try another, or use **BEST RX**. |
+| **It "sounds like multiple stations"** | Only MAIN + SUB are ever audible. If you're on an FT8 sub-band (e.g. 14.074), that one frequency carries *dozens* of simultaneous signals — that's the band, not multiple channels. Switch MAIN to a voice channel for a single voice. |
+| **Meter says "no meter"** | OpenWebRX / scanner-feed sources don't report a signal level, so the S-meter shows "no meter" rather than a fake zero. Audio/decode still work. |
+| **A receiver shows a reason under its name** | ⟳ = reconnecting (transient — public nodes are busy/time-limited); ✕ = a permanent error (e.g. auth) and it has stopped retrying. The reason persists until it recovers or you restart it. |
+| **SUB cell shows "RECENT DECODES"** | That's the no-SUB state — it lists recent digital decodes. **Right-click** a Memory channel to assign a SUB and the cell becomes the SUB meter. |
+| **No transcripts** | No Whisper model. Open **Settings** → **Download base model**, or **Choose…** an existing `ggml` file. Audio / waterfall / digital decode still work without it. |
+| **Recording stopped on its own** | A toast reports a write failure (disk full / folder removed) — HamHawk stops + finalizes rather than silently truncating. A startup toast also flags recordings a crash left incomplete. |
 | **Police bands won't tune** | They're **reference only** — HF SDR nodes can't receive VHF/UHF/P25. Add a scanner-feed source instead. |
 | **A scanner feed won't tune** | Feeds are fixed streams, not SDRs — tuning/scan don't apply. |
 | **Scan won't start** | Scanning needs a tunable SDR VFO selected as MAIN (not a feed). |
@@ -301,8 +334,10 @@ The palette is the fastest way to jump to a channel or run an action without hun
 
 HamHawk is built on one rule: **it never fabricates data.**
 
-- Meters move only from real S-meter telemetry.
+- Meters move only from real S-meter telemetry; a source that reports no level shows **"no meter"**, never a fake zero.
+- **S/N** is shown only when the signal actually reports it — otherwise it's hidden, not zeroed.
 - Decoders print only what they actually decode.
+- **"Live"** means audio/data is genuinely flowing; a struggling link shows its real reason.
 - Blank panels mean *no signal*, not *broken* — that distinction is intentional.
 
 **Limits:**

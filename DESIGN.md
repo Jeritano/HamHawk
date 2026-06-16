@@ -154,15 +154,21 @@ hamscope/
 -- A configured remote receiver the user has added.
 CREATE TABLE IF NOT EXISTS receiver (
   id            TEXT PRIMARY KEY,          -- uuid
-  kind          TEXT NOT NULL,             -- 'kiwisdr' | 'openwebrx'
-  url           TEXT NOT NULL,             -- base ws/http url of the node
+  kind          TEXT NOT NULL,             -- 'kiwisdr' | 'openwebrx' | 'feed'
+  url           TEXT NOT NULL,             -- base ws/http url of the node (or stream URL for feeds)
   label         TEXT,                      -- user-facing name
   freq_hz       INTEGER NOT NULL,          -- tuned center freq
   mode          TEXT NOT NULL,             -- 'usb'|'lsb'|'am'|'cw'|'ft8'|'ft4'|'psk31'|'rtty'
   lane          TEXT NOT NULL,             -- 'voice' | 'digital'
   enabled       INTEGER NOT NULL DEFAULT 1,
-  created_at    INTEGER NOT NULL           -- unix ms
+  created_at    INTEGER NOT NULL,          -- unix ms
+  favorite      INTEGER NOT NULL DEFAULT 0,-- quick-connect star (added by migration)
+  antenna       TEXT,                      -- free-text antenna desc (catalog or user); added by migration
+  region        TEXT                       -- coarse region label; added by migration
 );
+-- New columns (favorite/antenna/region) are added by an idempotent ALTER migration
+-- in db.rs (Db::migrate) so existing databases upgrade in place. add_receiver upserts
+-- with ON CONFLICT that preserves favorite + created_at across edits.
 
 -- One row per decoded/transcribed utterance or digital message.
 CREATE TABLE IF NOT EXISTS transcript (
@@ -367,23 +373,39 @@ Digital messages bypass the ASR pool and write straight to `store` with `lane = 
 add_receiver(cfg: ReceiverConfig) -> Result<ReceiverConfig>
 update_receiver(cfg: ReceiverConfig) -> Result<()>
 remove_receiver(id: String) -> Result<()>
+set_favorite(id: String, favorite: bool) -> Result<()>
 list_receivers() -> Vec<ReceiverConfig>
 start_receiver(id: String) -> Result<()>
 stop_receiver(id: String) -> Result<()>
+tune(id: String, freq_hz: u64) -> Result<()>           // live retune, no reconnect
+set_radio_ctl(id: String, ctl: RadioCtl) -> Result<()> // live filter/RF-gain (KiwiSDR)
+set_monitor(id) / set_monitor_sub(id) / set_watched(ids)
+start_recording(id) / stop_recording(id) / recording_ids() / recordings_dir()
+partial_recordings() -> Vec<String>                    // crash-left unfinalized WAVs
+export_log(format: "adif"|"csv", digital_only: bool) -> String   // returns file path
 query_transcripts(filter: TranscriptFilter) -> Vec<TranscriptRow>
+list_bookmarks/add_bookmark/remove_bookmark; list_alert_rules/add/remove; list_alert_hits
 get_settings() -> Settings
 set_settings(s: Settings) -> Result<()>
-list_model_options() -> Vec<ModelInfo>      // available/downloaded whisper models
-download_model(name: String) -> Result<()>   // emits progress events
+model_status() -> ModelStatus                // present? + path + source
+list_model_options() -> Vec<ModelInfo>
+download_model() -> Result<()>               // background; emits model_dl progress, atomic install
 ```
 
 ### Events (core → UI), in `events.rs`
 ```
-"telemetry"   payload: TelemetryFrame        // throttled per receiver
+"telemetry"   payload: TelemetryFrame        // throttled per receiver (s_meter_dbm, snr_db)
+"spectrum"    payload: { receiver_id, bins }  // waterfall row (watched receivers only)
+"audio"       payload: { receiver_id, sample_rate, pcm_b64 }  // MAIN/SUB monitored audio
 "transcript"  payload: TranscriptRow         // new decoded line
-"session"     payload: { receiver_id, status: SessionStatus, reason?: string }
-"model_dl"    payload: { name, pct, done }
+"session"     payload: { receiver_id, status: SessionStatus, reason?: string }  // Error = permanent
+"recording"   payload: { receiver_id, recording, error? }    // honest REC state
+"alert"       payload: AlertHit
+"model_dl"    payload: { received, total, done, error? }
 ```
+
+> Note: digital lanes are demodulated as **USB** (see §8.1 `sdr_demod`) and fed to the in-app decoder;
+> the SDR is never sent an invalid `mod=ft8`.
 
 `src/lib/ipc.ts` wraps each command (`invoke`) and event (`listen`) with the TS types from `types.ts`.
 
