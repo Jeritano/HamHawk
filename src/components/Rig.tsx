@@ -132,8 +132,17 @@ export function Rig() {
           <div className="model">HX-1 · HF/VHF SDR MONITOR</div>
           <button
             className={"rigbtn power" + (anyRunning ? " on" : "")}
-            title={anyRunning ? "Stop all receivers" : "Idle"}
-            onClick={() => anyRunning && stopAll()}
+            title={anyRunning ? "Power off — stop all receivers" : "Power on — start the selected station"}
+            disabled={!anyRunning && !activeId && receivers.length === 0}
+            onClick={() => {
+              if (anyRunning) {
+                stopAll();
+                return;
+              }
+              // Power ON: start + listen to the active (or first) station.
+              const id = activeId || receivers[0]?.id;
+              if (id) togglePlay(id);
+            }}
           >
             <div className="led" />
             <div className="k">POWER</div>
