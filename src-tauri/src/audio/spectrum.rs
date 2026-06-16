@@ -82,9 +82,12 @@ impl Spectrogram {
                 if mag < 1e-30 {
                     mag = 0.0;
                 }
-                // Log scale: map roughly [-80, 0] dBFS -> [0, 255].
+                // Log scale: map [-80, +24] dB -> [0, 255]. The +24 dB of headroom
+                // above unity (0 dB) keeps strong signals off the 255 ceiling so
+                // their spikes show a shape instead of a flat-topped plateau (and
+                // the waterfall gets the same extra dynamic range up top).
                 let db = 20.0 * (mag + 1e-6).log10();
-                let v = ((db + 80.0) / 80.0 * 255.0).clamp(0.0, 255.0);
+                let v = ((db + 80.0) / 104.0 * 255.0).clamp(0.0, 255.0);
                 bins.push(v as u8);
             }
             row = Some(bins);

@@ -27,7 +27,29 @@ impl Db {
         let conn = Connection::open(dir.join("db.sqlite"))?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(include_str!("schema.sql"))?;
+        Self::migrate(&conn)?;
         Ok(Self { conn: Mutex::new(conn) })
+    }
+
+    /// Additive, idempotent column migrations (the base schema runs every boot via
+    /// `CREATE TABLE IF NOT EXISTS`; new columns on existing tables need ALTERs that
+    /// only fire when the column is absent, so re-running is a no-op).
+    fn migrate(conn: &Connection) -> SqlResult<()> {
+        let have: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(receiver)")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            rows.collect::<SqlResult<Vec<_>>>()?
+        };
+        if !have.iter().any(|c| c == "favorite") {
+            conn.execute("ALTER TABLE receiver ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+        if !have.iter().any(|c| c == "antenna") {
+            conn.execute("ALTER TABLE receiver ADD COLUMN antenna TEXT", [])?;
+        }
+        if !have.iter().any(|c| c == "region") {
+            conn.execute("ALTER TABLE receiver ADD COLUMN region TEXT", [])?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -40,23 +62,52 @@ impl Db {
         freq_hz: u64,
         mode: &str,
         lane: &str,
+        antenna: Option<&str>,
+        region: Option<&str>,
     ) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
+        // Upsert that does NOT touch `favorite` or `created_at`, so editing a
+        // receiver (selectBand / fine-tune both re-add) preserves its star and age.
         conn.execute(
-            "INSERT OR REPLACE INTO receiver (id,kind,url,label,freq_hz,mode,lane,enabled,created_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,1,?8)",
-            params![id, kind, url, label, freq_hz, mode, lane, chrono::Utc::now().timestamp_millis()],
+            "INSERT INTO receiver (id,kind,url,label,freq_hz,mode,lane,antenna,region,enabled,created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,1,?10) \
+             ON CONFLICT(id) DO UPDATE SET \
+               kind=excluded.kind, url=excluded.url, label=excluded.label, freq_hz=excluded.freq_hz, \
+               mode=excluded.mode, lane=excluded.lane, antenna=excluded.antenna, region=excluded.region, \
+               enabled=excluded.enabled",
+            params![id, kind, url, label, freq_hz, mode, lane, antenna, region, chrono::Utc::now().timestamp_millis()],
         )?;
+        Ok(())
+    }
+
+    pub fn set_favorite(&self, id: &str, favorite: bool) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE receiver SET favorite=?1 WHERE id=?2", params![favorite as i64, id])?;
         Ok(())
     }
 
     #[allow(clippy::type_complexity)]
     pub fn list_receivers(
         &self,
-    ) -> SqlResult<Vec<(String, String, String, Option<String>, u64, String, String, bool)>> {
+    ) -> SqlResult<
+        Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            u64,
+            String,
+            String,
+            bool,
+            bool,
+            Option<String>,
+            Option<String>,
+        )>,
+    > {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT id,kind,url,label,freq_hz,mode,lane,enabled FROM receiver")?;
+        let mut stmt = conn.prepare(
+            "SELECT id,kind,url,label,freq_hz,mode,lane,enabled,favorite,antenna,region FROM receiver",
+        )?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -68,6 +119,9 @@ impl Db {
                     row.get(5)?,
                     row.get(6)?,
                     row.get::<_, i64>(7)? != 0,
+                    row.get::<_, i64>(8)? != 0,
+                    row.get(9)?,
+                    row.get(10)?,
                 ))
             })?
             .collect::<SqlResult<Vec<_>>>()?;

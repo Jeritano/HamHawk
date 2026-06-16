@@ -30,6 +30,7 @@ export function AddReceiverModal() {
   }, [open, addKind]);
   const [url, setUrl] = useState("");
   const [label, setLabel] = useState("");
+  const [antenna, setAntenna] = useState("");
   const [mhz, setMhz] = useState("14.074");
   const [mode, setMode] = useState("usb");
   const [lane, setLane] = useState<Lane>("voice");
@@ -57,9 +58,11 @@ export function AddReceiverModal() {
       freq_hz: isFeed ? 0 : Math.round(Number(mhz) * 1e6),
       mode: isFeed ? "fm" : mode,
       lane: isFeed ? "voice" : lane,
+      antenna: antenna.trim() || undefined,
     });
     setUrl("");
     setLabel("");
+    setAntenna("");
   };
 
   return (
@@ -171,6 +174,20 @@ export function AddReceiverModal() {
               onChange={(e) => setLabel(e.target.value)}
             />
           </div>
+          {!isFeed && (
+            <div>
+              <label className="fld">Antenna (optional)</label>
+              <input
+                className="input"
+                placeholder="e.g. Beverage 250m NE · Mini-Whip · 40m dipole"
+                value={antenna}
+                onChange={(e) => setAntenna(e.target.value)}
+              />
+              <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+                Shown in the memory list so you can pick a station by its antenna.
+              </div>
+            </div>
+          )}
         </div>
         <div className="foot">
           <button className="btn" onClick={() => setOpen(false)}>Cancel</button>

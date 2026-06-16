@@ -58,7 +58,8 @@ export function SpectrumTrace({ id }: { id: string }) {
         ctx.stroke();
       }
 
-      const yOf = (v: number) => h - (v / 255) * h * 0.92;
+      // 0.85 leaves ~15% headroom at the top so even a 255 bin clears the ceiling.
+      const yOf = (v: number) => h - (v / 255) * h * 0.85;
 
       // peak-hold (decay)
       for (let i = 0; i < n; i++) {

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore, type ReceiverConfig } from "../state/store";
 import { Waterfall } from "./Waterfall";
 import { SpectrumTrace } from "./SpectrumTrace";
@@ -9,8 +10,24 @@ import { LeftBands } from "./LeftBands";
 import { extractGrid, gridToLatLon } from "../lib/maidenhead";
 import { formatFreq, formatTimeHMS } from "../lib/format";
 import { audioPlayer } from "../lib/audioPlayer";
+import { telemetryBus } from "../lib/bus";
 
-type LcdView = "scope" | "afscope" | "text" | "map" | "activity" | "bmarks" | "alerts";
+type LcdView = "scope" | "afscope" | "text" | "map" | "activity" | "log" | "bmarks" | "alerts";
+
+// Best-effort callsign match for the logbook display (the file export uses the
+// backend parser). e.g. K1ABC / W3ILT / DL1XYZ / VK2DEF.
+function findCall(text: string): string | null {
+  const m = text.toUpperCase().match(/\b[A-Z]{1,2}\d[A-Z]{1,4}\b/);
+  return m ? m[0] : null;
+}
+
+// Passband edges (Hz, relative to tuned freq) for a given mode + filter width.
+function passbandFor(mode: string, width: number): { low_cut: number; high_cut: number } {
+  const m = mode.toLowerCase();
+  if (m === "am" || m === "amn") return { low_cut: -width / 2, high_cut: width / 2 };
+  if (m === "cw" || m === "cwn") return { low_cut: 550 - width / 2, high_cut: 550 + width / 2 };
+  return { low_cut: 300, high_cut: 300 + width }; // ssb
+}
 
 function freqParts(hz: number) {
   const s = hz.toLocaleString("de-DE"); // dot-grouped, e.g. 7.077.600
@@ -36,6 +53,9 @@ export function Rig() {
   const openAdd = useStore((s) => s.openAdd);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const setPaletteOpen = useStore((s) => s.setPaletteOpen);
+  const setBestOpen = useStore((s) => s.setBestOpen);
+  const toggleFavorite = useStore((s) => s.toggleFavorite);
+  const setRadioCtl = useStore((s) => s.setRadioCtl);
   const tune = useStore((s) => s.tune);
   const scanning = useStore((s) => s.scanning);
   const scanDir = useStore((s) => s.scanDir);
@@ -46,6 +66,8 @@ export function Rig() {
 
   const [view, setView] = useState<LcdView>("scope");
   const [vol, setVol] = useState(audioPlayer.getVolume());
+  const [filterBw, setFilterBw] = useState(2400); // SSB default passband width (Hz)
+  const [rfGain, setRfGain] = useState(0); // 0 = AGC (auto); >0 = manual RF gain
   const STEPS = [10, 100, 1000, 5000];
   const [stepIdx, setStepIdx] = useState(1); // default 100 Hz
   const step = STEPS[stepIdx];
@@ -53,6 +75,8 @@ export function Rig() {
   const dragY = useRef<number | null>(null);
 
   const main = receivers.find((r) => r.id === activeId) || null;
+  // Filter/RF-gain control is wired only for KiwiSDR (the SET-command protocol).
+  const kiwiMain = !!main && main.kind === "kiwisdr";
   // SUB = the receiver assigned to the right channel (dual receive), or null.
   const sub = receivers.find((r) => r.id === subId) || null;
   const mainStatus = main ? sessionStatus[main.id] ?? "stopped" : "stopped";
@@ -154,6 +178,11 @@ export function Rig() {
               <div className="v">menu</div>
             </button>
           </div>
+          <button className="rigbtn" title="Find the best-antenna KiwiSDR for a band/region" onClick={() => setBestOpen(true)}>
+            <div className="led" />
+            <div className="k">BEST RX</div>
+            <div className="v">auto-pick</div>
+          </button>
           <LeftBands />
         </div>
 
@@ -171,8 +200,9 @@ export function Rig() {
 
           <div className="vfos">
             <Vfo rx={main} role="MAIN" />
-            {/* SUB meter removed — leave the cell blank for now. */}
-            <div className="vfo sub-blank" />
+            {/* Adaptive SUB cell: SUB meter when a SUB receiver is assigned,
+                a live recent-decode ribbon when none is. */}
+            <SubCell sub={sub} />
           </div>
 
           <div className="lcd-body">
@@ -181,6 +211,7 @@ export function Rig() {
             {view === "text" && <TextView rx={main} />}
             {view === "map" && <MapView />}
             {view === "activity" && <ActivityView />}
+            {view === "log" && <LogView />}
             {view === "bmarks" && <BookmarksView />}
             {view === "alerts" && <AlertsView />}
           </div>
@@ -193,6 +224,7 @@ export function Rig() {
                 ["text", "TEXT"],
                 ["map", "MAP"],
                 ["activity", "ACTIVITY"],
+                ["log", "LOG"],
                 ["bmarks", "BMARKS"],
                 ["alerts", "ALERTS"],
               ] as [LcdView, string][]
@@ -285,48 +317,114 @@ export function Rig() {
             />
           </div>
 
+          {kiwiMain && (
+            <>
+              <div className="vol ctlrow" style={{ marginTop: 12 }}>
+                <div className="knob-label" style={{ textAlign: "center", marginBottom: 4 }}>
+                  FILTER <span style={{ color: "var(--teal)" }}>{(filterBw / 1000).toFixed(1)}k</span>
+                </div>
+                <input
+                  className="slider"
+                  type="range"
+                  min={300}
+                  max={6000}
+                  step={100}
+                  value={filterBw}
+                  title="Receiver passband width"
+                  onChange={(e) => {
+                    const bw = Number(e.target.value);
+                    setFilterBw(bw);
+                    if (main) setRadioCtl(main.id, passbandFor(main.mode, bw));
+                  }}
+                />
+              </div>
+              <div className="vol ctlrow" style={{ marginTop: 12 }}>
+                <div className="knob-label" style={{ textAlign: "center", marginBottom: 4 }}>
+                  RF GAIN <span style={{ color: "var(--teal)" }}>{rfGain === 0 ? "AGC" : `${rfGain}`}</span>
+                  <button
+                    className={"agcbtn" + (rfGain === 0 ? " on" : "")}
+                    title="Automatic gain control"
+                    onClick={() => {
+                      setRfGain(0);
+                      if (main) setRadioCtl(main.id, { agc: true });
+                    }}
+                  >
+                    AGC
+                  </button>
+                </div>
+                <input
+                  className="slider"
+                  type="range"
+                  min={0}
+                  max={120}
+                  step={1}
+                  value={rfGain}
+                  title="Manual RF gain (0 = AGC auto)"
+                  onChange={(e) => {
+                    const g = Number(e.target.value);
+                    setRfGain(g);
+                    if (main) setRadioCtl(main.id, g === 0 ? { agc: true } : { agc: false, man_gain: g });
+                  }}
+                />
+              </div>
+            </>
+          )}
+
           <div className="rmem">
             <div className="rmem-head">Memory · {receivers.length}</div>
             <div className="rmem-list">
-              {receivers.map((r) => {
-                const st = sessionStatus[r.id] ?? "stopped";
-                return (
-                  <button
-                    key={r.id}
-                    className={
-                      "rmem-item" +
-                      (st !== "stopped" ? " playing" : "") +
-                      (monitoredId === r.id ? " onair" : "") +
-                      (subId === r.id ? " issub" : "")
-                    }
-                    title="Click to listen (MAIN) · right-click to set SUB (right channel) · click again to stop"
-                    onClick={() => togglePlay(r.id)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      toggleSub(r.id);
-                    }}
-                  >
-                    <div className="r1">
-                      <span className={"dot " + st} />
-                      <span className="fr">{formatFreq(r.freq_hz)}</span>
-                      <span className="spacer" />
-                      {monitoredId === r.id && <span className="onair-tag">ON AIR</span>}
-                      {subId === r.id && <span className="sub-tag">SUB</span>}
-                      <span
-                        className="rmem-go"
-                        title="Edit / fine-tune"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditId(r.id);
-                        }}
-                      >
-                        ✎
-                      </span>
-                    </div>
-                    <div className="nm">{r.label || r.url}</div>
-                  </button>
-                );
-              })}
+              {[...receivers]
+                .sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite))
+                .map((r) => {
+                  const st = sessionStatus[r.id] ?? "stopped";
+                  return (
+                    <button
+                      key={r.id}
+                      className={
+                        "rmem-item" +
+                        (st !== "stopped" ? " playing" : "") +
+                        (monitoredId === r.id ? " onair" : "") +
+                        (subId === r.id ? " issub" : "")
+                      }
+                      title="Click to listen (MAIN) · right-click to set SUB (right channel) · click again to stop"
+                      onClick={() => togglePlay(r.id)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        toggleSub(r.id);
+                      }}
+                    >
+                      <div className="r1">
+                        <span
+                          className={"fav-star" + (r.favorite ? " on" : "")}
+                          title={r.favorite ? "Unfavorite" : "Favorite (quick-connect, sorts to top)"}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleFavorite(r.id);
+                          }}
+                        >
+                          {r.favorite ? "★" : "☆"}
+                        </span>
+                        <span className={"dot " + st} />
+                        <span className="fr">{formatFreq(r.freq_hz)}</span>
+                        <span className="spacer" />
+                        {monitoredId === r.id && <span className="onair-tag">ON AIR</span>}
+                        {subId === r.id && <span className="sub-tag">SUB</span>}
+                        <span
+                          className="rmem-go"
+                          title="Edit / fine-tune"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditId(r.id);
+                          }}
+                        >
+                          ✎
+                        </span>
+                      </div>
+                      <div className="nm">{r.label || r.url}</div>
+                      {r.antenna && <div className="ant">📡 {r.antenna}</div>}
+                    </button>
+                  );
+                })}
             </div>
           </div>
         </div>
@@ -378,6 +476,7 @@ function Vfo({ rx, role }: { rx: ReceiverConfig | null; role: "MAIN" | "SUB" }) 
         <span className={"tag " + role.toLowerCase()}>{role}</span>
         <span className="tag mode">{rx.mode.toUpperCase()}</span>
         <span className="tag fil">FIL2</span>
+        <SnrTag id={rx.id} />
         <span className="vfo-name">{rx.label || rx.url}</span>
       </div>
       <SMeterArc id={rx.id} label={role} />
@@ -385,6 +484,84 @@ function Vfo({ rx, role }: { rx: ReceiverConfig | null; role: "MAIN" | "SUB" }) 
         {main}.<span className="hz">{hz}</span>
       </div>
       <div className="freq-sub">{(rx.freq_hz / 1e6).toFixed(5)} MHz · {rx.mode.toUpperCase()} · {rx.lane}</div>
+    </div>
+  );
+}
+
+// Live S/N readout driven off the telemetry bus (same ref-update, no-re-render
+// pattern as SMeterArc). Hidden whenever snr_db is absent — never shows a fake 0.
+function SnrTag({ id }: { id: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.style.display = "none"; // reset on id change
+    const off = telemetryBus.on(id, (t) => {
+      const el = ref.current;
+      if (!el) return;
+      if (t.snr_db != null && Number.isFinite(t.snr_db)) {
+        el.textContent = `S/N ${t.snr_db > 0 ? "+" : ""}${t.snr_db.toFixed(0)}`;
+        el.style.display = "";
+      } else {
+        el.style.display = "none";
+      }
+    });
+    return off;
+  }, [id]);
+  return <span ref={ref} className="tag snr" style={{ display: "none" }} />;
+}
+
+/** Adaptive SUB cell: the SUB VFO meter when a SUB (right-channel) receiver is
+ *  assigned, otherwise a live recent-decode ribbon so the slot is never dead. */
+function SubCell({ sub }: { sub: ReceiverConfig | null }) {
+  if (sub) return <Vfo rx={sub} role="SUB" />;
+  return <DecodeRibbon />;
+}
+
+/** Newest-first digital decodes (callsign + grid + S/N) from any running receiver.
+ *  Click a row to make MAIN listen to the receiver that heard it. Real data only. */
+function DecodeRibbon() {
+  const transcripts = useStore((s) => s.transcripts);
+  const receivers = useStore((s) => s.receivers);
+  const sessionStatus = useStore((s) => s.sessionStatus);
+  const startReceiver = useStore((s) => s.startReceiver);
+  const setMonitor = useStore((s) => s.setMonitor);
+  const setActive = useStore((s) => s.setActive);
+
+  const rows = useMemo(() => transcripts.filter((t) => t.lane === "digital").slice(0, 8), [transcripts]);
+
+  const go = async (rid: string) => {
+    if (!receivers.some((r) => r.id === rid)) return;
+    setActive(rid);
+    const running = (sessionStatus[rid] ?? "stopped") !== "stopped";
+    const ok = running || (await startReceiver(rid));
+    if (ok) await setMonitor(rid);
+  };
+
+  return (
+    <div className="vfo subribbon">
+      <div className="ribbon-head">RECENT DECODES</div>
+      {rows.length === 0 ? (
+        <div className="ribbon-empty">No digital decodes yet — right-click a memory to assign a SUB receiver.</div>
+      ) : (
+        <div className="ribbon-list">
+          {rows.map((t) => {
+            const call = findCall(t.text_en);
+            const grid = extractGrid(t.text_en);
+            return (
+              <button
+                className="ribbon-row"
+                key={t.id + "-" + t.ts_start}
+                title="Listen to the receiver that decoded this"
+                onClick={() => go(t.receiver_id)}
+              >
+                <span className="rb-call">{call || t.mode.toUpperCase()}</span>
+                {grid && <span className="rb-grid">{grid}</span>}
+                <span className="rb-txt">{t.text_en}</span>
+                {t.snr_db != null && <span className="rb-snr">{t.snr_db.toFixed(0)}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -489,6 +666,68 @@ function ActivityView() {
           <span className="tm">{formatTimeHMS(t.ts_start)}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+function LogView() {
+  const transcripts = useStore((s) => s.transcripts);
+  const exportLog = useStore((s) => s.exportLog);
+  const [busy, setBusy] = useState(false);
+  const [last, setLast] = useState("");
+  const rows = transcripts.slice(0, 200);
+  const doExport = async (fmt: "adif" | "csv") => {
+    setBusy(true);
+    // ADIF carries callsigns/grids → digital lane only; CSV exports everything.
+    const path = await exportLog(fmt, fmt === "adif");
+    setBusy(false);
+    if (path) {
+      setLast(path);
+      openPath(path).catch(() => {});
+    }
+  };
+  return (
+    <div className="lcd-data">
+      <div className="section-title">
+        <span>Logbook ({transcripts.length})</span>
+        <span>
+          <button className="btn sm" disabled={busy || !transcripts.length} onClick={() => doExport("adif")}>
+            Export ADIF
+          </button>{" "}
+          <button className="btn sm" disabled={busy || !transcripts.length} onClick={() => doExport("csv")}>
+            Export CSV
+          </button>
+        </span>
+      </div>
+      {last && (
+        <div className="faint" style={{ fontSize: 11, padding: "0 2px 8px", wordBreak: "break-all" }}>
+          Saved → {last}
+        </div>
+      )}
+      {rows.length === 0 && (
+        <div className="faint" style={{ fontSize: 13, padding: 8 }}>
+          No decodes or transcripts logged yet. Run a digital (FT8/CW) or voice receiver.
+        </div>
+      )}
+      {rows.map((t) => {
+        const call = findCall(t.text_en);
+        const grid = extractGrid(t.text_en);
+        return (
+          <div className="list-row" key={t.id + "-" + t.ts_start}>
+            <div className="main">
+              <div className="t" style={{ whiteSpace: "normal" }}>
+                {call && <span style={{ color: "var(--teal)", fontWeight: 700 }}>{call} </span>}
+                {grid && <span className="faint">{grid} </span>}
+                <span style={{ fontWeight: 400 }}>{t.text_en}</span>
+              </div>
+              <div className="s">
+                {formatTimeHMS(t.ts_start)} · {t.mode.toUpperCase()} · {t.lane}
+                {t.snr_db != null ? ` · ${t.snr_db.toFixed(0)}dB` : ""}
+              </div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

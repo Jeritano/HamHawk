@@ -77,6 +77,15 @@ pub fn remove_receiver(orchestrator: State<'_, Orchestrator>, id: String) -> Res
 }
 
 #[tauri::command]
+pub fn set_favorite(
+    orchestrator: State<'_, Orchestrator>,
+    id: String,
+    favorite: bool,
+) -> Result<(), String> {
+    orchestrator.set_favorite(&id, favorite)
+}
+
+#[tauri::command]
 pub fn list_receivers(
     orchestrator: State<'_, Orchestrator>,
 ) -> Result<Vec<ReceiverConfig>, String> {
@@ -97,6 +106,24 @@ pub fn stop_receiver(orchestrator: State<'_, Orchestrator>, id: String) -> Resul
 #[tauri::command]
 pub fn tune(orchestrator: State<'_, Orchestrator>, id: String, freq_hz: u64) -> Result<(), String> {
     orchestrator.tune(&id, freq_hz)
+}
+
+#[tauri::command]
+pub fn set_radio_ctl(
+    orchestrator: State<'_, Orchestrator>,
+    id: String,
+    ctl: crate::model::RadioCtl,
+) -> Result<(), String> {
+    orchestrator.set_radio_ctl(&id, ctl)
+}
+
+#[tauri::command]
+pub fn export_log(
+    orchestrator: State<'_, Orchestrator>,
+    format: String,
+    digital_only: bool,
+) -> Result<String, String> {
+    orchestrator.export_log(&format, digital_only)
 }
 
 #[tauri::command]

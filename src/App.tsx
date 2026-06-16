@@ -4,6 +4,7 @@ import { Rig } from "./components/Rig";
 import { CommandPalette } from "./components/CommandPalette";
 import { SettingsModal } from "./components/SettingsModal";
 import { AddReceiverModal } from "./components/AddReceiverModal";
+import { BestPicker } from "./components/BestPicker";
 import { EditMemoryModal } from "./components/EditMemoryModal";
 
 export default function App() {
@@ -45,6 +46,7 @@ export default function App() {
       <CommandPalette />
       <SettingsModal />
       <AddReceiverModal />
+      <BestPicker />
       <EditMemoryModal />
       <Toasts />
     </>

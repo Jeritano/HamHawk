@@ -3,6 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore } from "../state/store";
+import {
+  THEMES,
+  getTheme,
+  getControlSize,
+  applyTheme,
+  applyControlSize,
+  type ThemeId,
+  type ControlSize,
+} from "../lib/theme";
 
 interface Settings {
   asr_worker_count: number;
@@ -16,6 +25,8 @@ export function SettingsModal() {
   const [settings, setSettings] = useState<Settings>({ asr_worker_count: 2 });
   const [effectiveDir, setEffectiveDir] = useState("");
   const [saving, setSaving] = useState(false);
+  const [theme, setTheme] = useState<ThemeId>(getTheme());
+  const [controlSize, setControlSize] = useState<ControlSize>(getControlSize());
 
   useEffect(() => {
     if (open) {
@@ -55,6 +66,43 @@ export function SettingsModal() {
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>Settings</h2>
         <div className="body">
+          <div>
+            <label className="fld">Accessibility — color theme</label>
+            <select
+              className="input"
+              value={theme}
+              onChange={(e) => {
+                const t = e.target.value as ThemeId;
+                setTheme(t);
+                applyTheme(t); // live preview + persist immediately
+              }}
+            >
+              {THEMES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label} — {t.note}
+                </option>
+              ))}
+            </select>
+            <div className="row" style={{ marginTop: 8 }}>
+              <label className="fld" style={{ margin: 0 }}>Larger controls</label>
+              <span className="spacer" />
+              <button
+                className={"btn sm" + (controlSize === "large" ? " primary" : "")}
+                onClick={() => {
+                  const s: ControlSize = controlSize === "large" ? "normal" : "large";
+                  setControlSize(s);
+                  applyControlSize(s);
+                }}
+              >
+                {controlSize === "large" ? "On" : "Off"}
+              </button>
+            </div>
+            <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+              Colorblind-safe palettes keep the status colors (live / sub / alert) distinguishable.
+              Applies instantly and is remembered.
+            </div>
+          </div>
+
           <div>
             <label className="fld">ASR worker count</label>
             <input

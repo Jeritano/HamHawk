@@ -32,6 +32,8 @@ struct Session {
     tasks: Vec<JoinHandle<()>>,
     /// Live retune channel into the running source (no reconnect).
     tune_tx: mpsc::Sender<u64>,
+    /// Live filter / RF-gain control channel (KiwiSDR; no reconnect).
+    ctl_tx: mpsc::Sender<crate::model::RadioCtl>,
     /// Cancels detached work (feed HTTP thread + decoder) that abort can't reach.
     cancel: Arc<AtomicBool>,
 }
@@ -149,8 +151,14 @@ impl Orchestrator {
                 cfg.freq_hz,
                 &cfg.mode,
                 lane_str(&cfg.lane),
+                cfg.antenna.as_deref(),
+                cfg.region.as_deref(),
             )
             .map_err(|e| e.to_string())
+    }
+
+    pub fn set_favorite(&self, id: &str, favorite: bool) -> Result<(), String> {
+        self.db.set_favorite(id, favorite).map_err(|e| e.to_string())
     }
 
     pub fn list_receivers(&self) -> Result<Vec<ReceiverConfig>, String> {
@@ -201,6 +209,7 @@ impl Orchestrator {
         let (telem_tx, telem_rx) = mpsc::channel::<SourceTelemetry>(64);
         let (digital_tx, digital_rx) = mpsc::channel::<Vec<crate::digital::DigitalMsg>>(64);
         let (tune_tx, tune_rx) = mpsc::channel::<u64>(8);
+        let (ctl_tx, ctl_rx) = mpsc::channel::<crate::model::RadioCtl>(8);
         let cancel = Arc::new(AtomicBool::new(false));
 
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
@@ -212,7 +221,7 @@ impl Orchestrator {
             let id = id.to_string();
             let db = self.db.clone();
             let cancel = cancel.clone();
-            tasks.push(spawn(source_loop(cfg, id, app, raw_tx, telem_tx, tune_rx, db, cancel)));
+            tasks.push(spawn(source_loop(cfg, id, app, raw_tx, telem_tx, tune_rx, ctl_rx, db, cancel)));
         }
 
         // 2. Tap: spectrum (waterfall) + monitored audio + recording, then forward.
@@ -290,7 +299,7 @@ impl Orchestrator {
         }
         // `tap` is dropped here (not stored) → detached; it self-terminates when
         // the source closes.
-        sessions.insert(id.to_string(), Session { tasks, tune_tx, cancel });
+        sessions.insert(id.to_string(), Session { tasks, tune_tx, ctl_tx, cancel });
         Ok(())
     }
 
@@ -302,6 +311,15 @@ impl Orchestrator {
             .map_err(|e| e.to_string())?;
         if let Some(sess) = self.sessions.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
             let _ = sess.tune_tx.try_send(freq_hz); // best-effort live retune
+        }
+        Ok(())
+    }
+
+    /// Live filter / RF-gain change on a running receiver (KiwiSDR). Best-effort —
+    /// no-op if the receiver isn't running or the source ignores control messages.
+    pub fn set_radio_ctl(&self, id: &str, ctl: crate::model::RadioCtl) -> Result<(), String> {
+        if let Some(sess) = self.sessions.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
+            let _ = sess.ctl_tx.try_send(ctl);
         }
         Ok(())
     }
@@ -386,6 +404,51 @@ impl Orchestrator {
             .query_transcripts(receiver_id, time_range, text_query)
             .map_err(|e| e.to_string())?;
         Ok(rows.into_iter().map(row_to_transcript).collect())
+    }
+
+    // ---- logbook export ----
+
+    /// Export decoded/transcribed traffic to an ADIF (.adi) or CSV (.csv) file in
+    /// ~/.hamhawk/exports and return the path. `digital_only` limits it to the
+    /// digital lane (FT8/CW/RTTY) — the rows that carry callsigns/grids.
+    pub fn export_log(&self, format: &str, digital_only: bool) -> Result<String, String> {
+        let rows = self
+            .db
+            .query_transcripts(None, None, None)
+            .map_err(|e| e.to_string())?;
+        // Map receiver_id -> (current freq_hz, label) for FREQ/station columns. The
+        // freq is the receiver's CURRENT freq (best-effort; decodes don't store it).
+        let meta: HashMap<String, (u64, String)> = self
+            .list_receivers()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.id.clone(), (c.freq_hz, c.label.unwrap_or(c.url))))
+            .collect();
+
+        let mut rows: Vec<_> = rows
+            .into_iter()
+            .map(row_to_transcript)
+            .filter(|t| !digital_only || matches!(t.lane, Lane::Digital))
+            .collect();
+        rows.sort_by_key(|t| t.ts_start); // chronological for a logbook
+
+        let ext = if format.eq_ignore_ascii_case("adif") || format.eq_ignore_ascii_case("adi") {
+            "adi"
+        } else {
+            "csv"
+        };
+        let body = if ext == "adi" {
+            export_adif(&rows, &meta)
+        } else {
+            export_csv(&rows, &meta)
+        };
+
+        let dir = data_dir().join("exports");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let path = dir.join(format!("hamhawk-log-{ts}.{ext}"));
+        std::fs::write(&path, body).map_err(|e| e.to_string())?;
+        Ok(path.to_string_lossy().to_string())
     }
 
     // ---- bookmarks ----
@@ -530,6 +593,170 @@ impl Orchestrator {
     }
 }
 
+// ---- logbook formatting ----
+
+/// Best-effort callsign extraction: a token like K1ABC / W3ILT / DL1XYZ / VK2DEF —
+/// 1-2 leading letters, a digit, then 1-3 trailing letters. Honest heuristic, not a
+/// validator; returns the first match (uppercased) or None.
+fn find_callsign(text: &str) -> Option<String> {
+    for raw in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '/') {
+        let tok = raw.trim_matches('/');
+        if tok.len() < 3 || tok.len() > 7 {
+            continue;
+        }
+        let bytes = tok.as_bytes();
+        let mut letters_pre = 0usize;
+        let mut i = 0usize;
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+            letters_pre += 1;
+            i += 1;
+        }
+        if !(1..=2).contains(&letters_pre) || i >= bytes.len() || !bytes[i].is_ascii_digit() {
+            continue;
+        }
+        i += 1;
+        let mut letters_post = 0usize;
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+            letters_post += 1;
+            i += 1;
+        }
+        if i == bytes.len() && (1..=4).contains(&letters_post) {
+            return Some(tok.to_ascii_uppercase());
+        }
+    }
+    None
+}
+
+/// Best-effort Maidenhead grid: 2 letters A-R, 2 digits, optional 2 letters a-x.
+fn find_grid(text: &str) -> Option<String> {
+    for raw in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let t = raw;
+        if !(t.len() == 4 || t.len() == 6) {
+            continue;
+        }
+        let b = t.as_bytes();
+        let f1 = b[0].to_ascii_uppercase();
+        let f2 = b[1].to_ascii_uppercase();
+        if !(b'A'..=b'R').contains(&f1) || !(b'A'..=b'R').contains(&f2) {
+            continue;
+        }
+        if !b[2].is_ascii_digit() || !b[3].is_ascii_digit() {
+            continue;
+        }
+        if t.len() == 6 {
+            let s1 = b[4].to_ascii_lowercase();
+            let s2 = b[5].to_ascii_lowercase();
+            if !(b'a'..=b'x').contains(&s1) || !(b'a'..=b'x').contains(&s2) {
+                continue;
+            }
+        }
+        let mut g = String::new();
+        g.push(f1 as char);
+        g.push(f2 as char);
+        g.push_str(&t[2..]);
+        return Some(g);
+    }
+    None
+}
+
+fn adif_band(freq_hz: u64) -> &'static str {
+    let m = freq_hz as f64 / 1e6;
+    match m {
+        x if (0.135..0.138).contains(&x) => "2190m",
+        x if (1.8..2.0).contains(&x) => "160m",
+        x if (3.5..4.0).contains(&x) => "80m",
+        x if (5.0..5.5).contains(&x) => "60m",
+        x if (7.0..7.3).contains(&x) => "40m",
+        x if (10.1..10.15).contains(&x) => "30m",
+        x if (14.0..14.35).contains(&x) => "20m",
+        x if (18.0..18.2).contains(&x) => "17m",
+        x if (21.0..21.45).contains(&x) => "15m",
+        x if (24.8..25.0).contains(&x) => "12m",
+        x if (28.0..29.7).contains(&x) => "10m",
+        x if (50.0..54.0).contains(&x) => "6m",
+        x if (144.0..148.0).contains(&x) => "2m",
+        _ => "",
+    }
+}
+
+fn adif_field(name: &str, val: &str) -> String {
+    if val.is_empty() {
+        String::new()
+    } else {
+        format!("<{}:{}>{}", name, val.len(), val)
+    }
+}
+
+fn export_adif(rows: &[TranscriptRow], meta: &HashMap<String, (u64, String)>) -> String {
+    let mut out = String::from(
+        "ADIF export from HamHawk — received/decoded traffic (monitoring log, not 2-way QSOs).\n\
+         <ADIF_VER:5>3.1.4<PROGRAMID:7>HamHawk<EOH>\n",
+    );
+    for t in rows {
+        let freq_hz = meta.get(&t.receiver_id).map(|(f, _)| *f).unwrap_or(0);
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(t.ts_start)
+            .unwrap_or_default();
+        let date = dt.format("%Y%m%d").to_string();
+        let time = dt.format("%H%M%S").to_string();
+        let call = find_callsign(&t.text_en).unwrap_or_default();
+        let grid = find_grid(&t.text_en).unwrap_or_default();
+        let freq_mhz = if freq_hz > 0 { format!("{:.6}", freq_hz as f64 / 1e6) } else { String::new() };
+        let snr = t.snr_db.map(|s| format!("{:.0}", s)).unwrap_or_default();
+        let mode = t.mode.to_uppercase();
+        let mut rec = String::new();
+        rec.push_str(&adif_field("QSO_DATE", &date));
+        rec.push_str(&adif_field("TIME_ON", &time));
+        rec.push_str(&adif_field("CALL", &call));
+        rec.push_str(&adif_field("GRIDSQUARE", &grid));
+        rec.push_str(&adif_field("MODE", &mode));
+        rec.push_str(&adif_field("FREQ", &freq_mhz));
+        rec.push_str(&adif_field("BAND", adif_band(freq_hz)));
+        if !snr.is_empty() {
+            rec.push_str(&adif_field("APP_HAMHAWK_SNR", &snr));
+        }
+        rec.push_str(&adif_field("COMMENT", t.text_en.trim()));
+        rec.push_str("<EOR>\n");
+        out.push_str(&rec);
+    }
+    out
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(['"', ',', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn export_csv(rows: &[TranscriptRow], meta: &HashMap<String, (u64, String)>) -> String {
+    let mut out =
+        String::from("timestamp_utc,station,freq_mhz,mode,lane,snr_db,callsign,grid,text\n");
+    for t in rows {
+        let (freq_hz, label) = meta.get(&t.receiver_id).cloned().unwrap_or((0, t.receiver_id.clone()));
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(t.ts_start)
+            .unwrap_or_default();
+        let lane = match t.lane {
+            Lane::Voice => "voice",
+            Lane::Digital => "digital",
+        };
+        let cols = [
+            dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+            label,
+            if freq_hz > 0 { format!("{:.6}", freq_hz as f64 / 1e6) } else { String::new() },
+            t.mode.clone(),
+            lane.to_string(),
+            t.snr_db.map(|s| format!("{:.0}", s)).unwrap_or_default(),
+            find_callsign(&t.text_en).unwrap_or_default(),
+            find_grid(&t.text_en).unwrap_or_default(),
+            t.text_en.trim().to_string(),
+        ];
+        out.push_str(&cols.iter().map(|c| csv_escape(c)).collect::<Vec<_>>().join(","));
+        out.push('\n');
+    }
+    out
+}
+
 fn load_alert_rules(db: &Arc<Db>) -> Vec<AlertRule> {
     db.list_alert_rules()
         .unwrap_or_default()
@@ -548,6 +775,7 @@ async fn source_loop(
     audio_tx: mpsc::Sender<AudioFrame>,
     telem_tx: mpsc::Sender<SourceTelemetry>,
     mut tune_rx: mpsc::Receiver<u64>,
+    mut ctl_rx: mpsc::Receiver<crate::model::RadioCtl>,
     db: Arc<Db>,
     cancel: Arc<AtomicBool>,
 ) {
@@ -572,6 +800,7 @@ async fn source_loop(
                         telem_tx.clone(),
                         move || events::emit_session(&app2, &id2, SessionStatus::Live, None),
                         &mut tune_rx,
+                        &mut ctl_rx,
                     )
                     .await
             }
@@ -957,7 +1186,19 @@ fn parse_lane(s: &str) -> Lane {
     }
 }
 
-type ReceiverRow = (String, String, String, Option<String>, u64, String, String, bool);
+type ReceiverRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    u64,
+    String,
+    String,
+    bool,
+    bool,
+    Option<String>,
+    Option<String>,
+);
 
 fn row_to_config(r: ReceiverRow) -> ReceiverConfig {
     ReceiverConfig {
@@ -969,6 +1210,9 @@ fn row_to_config(r: ReceiverRow) -> ReceiverConfig {
         mode: r.5,
         lane: parse_lane(&r.6),
         enabled: r.7,
+        favorite: r.8,
+        antenna: r.9,
+        region: r.10,
     }
 }
 

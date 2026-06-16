@@ -62,7 +62,20 @@ impl OpenWebRX {
             "am" | "amn" => (-4000, 4000),
             "lsb" => (-2700, -300),
             "cw" | "cwn" => (-400, 400),
-            _ => (300, 2700), // usb / ssb
+            // Digital decoders run on USB audio; give them the full ~0-3 kHz.
+            "ft8" | "ft4" | "psk31" | "rtty" => (100, 3000),
+            _ => (300, 2700), // usb / ssb voice
+        }
+    }
+
+    /// Map a HamHawk mode to a valid OpenWebRX DEMODULATION mode. OWRX has no
+    /// "ft8"/"psk31"/etc. demod — digital modes are decoded from USB audio.
+    fn sdr_demod(mode: &str) -> &'static str {
+        match mode {
+            "lsb" => "lsb",
+            "am" | "amn" => "am",
+            "cw" | "cwn" => "cw",
+            _ => "usb", // usb voice + all digital modes
         }
     }
 
@@ -102,6 +115,7 @@ impl OpenWebRX {
             .map_err(|e| SourceError(format!("connectionproperties send failed: {e}")))?;
 
         let mode = cfg.mode.to_lowercase();
+        let demod = Self::sdr_demod(&mode); // valid OWRX demod (digital -> usb)
         let (low_cut, high_cut) = Self::passband(&mode);
         let mut started = false;
         let mut compression = String::from("adpcm"); // OWRX default
@@ -129,7 +143,7 @@ impl OpenWebRX {
                         let offset = f as i64 - c;
                         let params = serde_json::json!({
                             "type": "dspcontrol",
-                            "params": { "low_cut": low_cut, "high_cut": high_cut, "offset_freq": offset, "mod": mode, "squelch_level": -150 }
+                            "params": { "low_cut": low_cut, "high_cut": high_cut, "offset_freq": offset, "mod": demod, "squelch_level": -150 }
                         });
                         if write.send(Message::Text(params.to_string())).await.is_err() {
                             break Err(SourceError("retune send failed".into()));
@@ -161,7 +175,7 @@ impl OpenWebRX {
                                         "low_cut": low_cut,
                                         "high_cut": high_cut,
                                         "offset_freq": offset,
-                                        "mod": mode,
+                                        "mod": demod,
                                         "squelch_level": -150
                                     }
                                 });

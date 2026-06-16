@@ -18,6 +18,15 @@ pub struct ReceiverConfig {
     pub mode: String,
     pub lane: Lane,
     pub enabled: bool,
+    /// Quick-connect star (RHR-style). Preserved across edits.
+    #[serde(default)]
+    pub favorite: bool,
+    /// Free-text antenna description (from the KiwiSDR catalog or user-entered).
+    #[serde(default)]
+    pub antenna: Option<String>,
+    /// Coarse region label (Europe / North America / …) for filtering.
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -46,6 +55,22 @@ pub struct TelemetryFrame {
     pub s_meter_dbm: Option<f32>,
     pub snr_db: Option<f32>,
     pub waterfall_row: Option<Vec<u8>>,
+}
+
+/// Live receiver-control message (applied on the open socket, no reconnect).
+/// All fields optional so the UI can change just the filter or just the gain.
+/// KiwiSDR only for now (OpenWebRX/feeds ignore it). Not persisted: the SDR
+/// resets the passband to the mode default on reconnect anyway.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RadioCtl {
+    /// Passband low edge in Hz (relative to the tuned freq; negative for AM).
+    pub low_cut: Option<f64>,
+    /// Passband high edge in Hz.
+    pub high_cut: Option<f64>,
+    /// AGC on (automatic gain) vs off (manual gain via `man_gain`).
+    pub agc: Option<bool>,
+    /// Manual RF gain (KiwiSDR `manGain`, ~0..120) — used when AGC is off.
+    pub man_gain: Option<i32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -372,3 +372,77 @@ label.fld { display: block; font-size: 11px; color: var(--label); margin: 0 0 4p
 .lband .bs { font-family: var(--mono); font-size: 9px; color: var(--faint); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .softkey { transition: filter .1s, color .1s; }
 .rigbtn { transition: filter .1s, transform .05s; }
+
+/* ===== accessibility themes (colorblind-safe palettes) =====
+   Override the accent variables only; chassis/LCD structure stays the same.
+   Chosen so the status colors (live/sub/alert/scope) stay distinguishable for
+   each deficiency type. Applied via <html data-theme="…">. */
+:root[data-theme="deuteranopia"] {
+  --teal: #34c3ff; --scope: #4aa3ff; --scope-fill: rgba(74,163,255,.18);
+  --green: #4aa3ff; --amber: #ffc233; --red: #ff7a18;
+}
+:root[data-theme="protanopia"] {
+  --teal: #36c9ef; --scope: #5ea0ff; --scope-fill: rgba(94,160,255,.18);
+  --green: #6cb4ff; --amber: #ffd21e; --red: #ff8c1a;
+}
+:root[data-theme="tritanopia"] {
+  --teal: #ff5d7a; --scope: #25e0d2; --scope-fill: rgba(37,224,210,.18);
+  --green: #25e0d2; --amber: #ff5d7a; --red: #ff2d6a;
+}
+:root[data-theme="highcontrast"] {
+  --ink: #ffffff; --teal: #00ffd0; --scope: #36b8ff; --scope-fill: rgba(54,184,255,.28);
+  --green: #19ff7a; --amber: #ffcf33; --red: #ff4040; --label: #d6dde4; --faint: #97a2ad;
+  --lcd: #000600; --lcd-line: #1d5b4d;
+}
+
+/* ===== larger controls (motor/low-vision aid). Applied via data-controls="large". */
+:root[data-controls="large"] .softkey { padding: 13px 4px; font-size: 13px; }
+:root[data-controls="large"] .rigbtn .k { font-size: 12px; }
+:root[data-controls="large"] .rigbtn .v { font-size: 10px; }
+:root[data-controls="large"] .slider { height: 7px; }
+:root[data-controls="large"] .slider::-webkit-slider-thumb { width: 20px; height: 20px; }
+:root[data-controls="large"] .rmem-item { padding: 8px 9px; }
+:root[data-controls="large"] .rmem-item .fr { font-size: 13px; }
+:root[data-controls="large"] .rmem-item .nm { font-size: 11px; }
+:root[data-controls="large"] .btn { padding: 9px 14px; font-size: 13.5px; }
+
+/* ===== per-channel antenna line in the right-rail memory list ===== */
+.rmem-item .ant { font-size: 8.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
+.fav-star { font-size: 11px; line-height: 1; color: var(--faint); width: 15px; text-align: center; border-radius: 4px; }
+.fav-star.on { color: var(--amber); }
+.fav-star:hover { color: var(--amber); background: rgba(255,179,64,.12); }
+
+/* ===== filter / RF-gain control block (right column) ===== */
+.ctlrow { width: 100%; }
+.ctlrow .agcbtn { font-size: 8px; font-weight: 800; letter-spacing: .3px; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--btn-edge); background: var(--bezel); color: var(--faint); margin-left: 6px; }
+.ctlrow .agcbtn.on { color: #06121f; background: var(--teal); border-color: var(--teal); }
+
+/* ===== best-receiver catalog picker ===== */
+.cat-row { display: flex; gap: 9px; align-items: center; padding: 8px 9px; border: 1px solid var(--lcd-line); border-radius: 7px; background: #06201a; margin-bottom: 6px; }
+.cat-row .main { flex: 1; min-width: 0; }
+.cat-row .nm { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cat-row .ant { font-size: 11px; color: var(--label); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cat-row .meta { font-size: 10px; color: var(--faint); margin-top: 1px; }
+.cat-snr { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--teal); text-align: center; min-width: 46px; }
+.cat-snr .u { font-size: 8px; color: var(--faint); display: block; }
+.cat-filters { display: flex; gap: 8px; margin-bottom: 10px; }
+.cat-filters select { flex: 1; }
+
+/* ===== live S/N tag in a VFO head (shown only when snr_db is real) ===== */
+.tag.snr { background: #0e2f2a; color: var(--teal); border: 1px solid var(--lcd-line); font-family: var(--mono); font-weight: 700; }
+
+/* ===== adaptive SUB cell: recent-decode ribbon (shown when no SUB assigned) ===== */
+.subribbon { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.ribbon-head { font-size: 8.5px; letter-spacing: .5px; color: var(--label); text-transform: uppercase; margin-bottom: 4px; flex: none; }
+.ribbon-empty { font-size: 10px; color: var(--faint); line-height: 1.4; }
+.ribbon-list { display: flex; flex-direction: column; gap: 1px; overflow-y: auto; min-height: 0; }
+.ribbon-row {
+  display: flex; align-items: baseline; gap: 6px; width: 100%; text-align: left;
+  background: transparent; border: 0; border-bottom: 1px solid var(--lcd-line);
+  padding: 2px 2px; font-family: var(--mono); font-size: 10px; color: var(--scope);
+}
+.ribbon-row:hover { background: rgba(42,168,255,.10); }
+.ribbon-row .rb-call { color: var(--teal); font-weight: 700; flex: none; }
+.ribbon-row .rb-grid { color: var(--amber); flex: none; }
+.ribbon-row .rb-txt { color: var(--label); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ribbon-row .rb-snr { color: var(--faint); flex: none; }

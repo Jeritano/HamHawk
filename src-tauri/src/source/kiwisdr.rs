@@ -11,7 +11,7 @@
 
 use super::{AudioFrame, SourceError, TelemetryFrame};
 use crate::audio::adpcm::ImaAdpcm;
-use crate::model::ReceiverConfig;
+use crate::model::{RadioCtl, ReceiverConfig};
 use futures::{SinkExt, StreamExt};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
@@ -75,7 +75,24 @@ impl KiwiSDR {
         match mode {
             "am" | "amn" => (-4000.0, 4000.0),
             "cw" | "cwn" => (300.0, 800.0),
-            _ => (300.0, 2700.0), // usb / lsb / ssb
+            // Digital decoders (FT8/FT4/PSK/RTTY) run on USB audio and need the
+            // full ~0-3 kHz spectrum, not the narrow voice passband.
+            "ft8" | "ft4" | "psk31" | "rtty" => (100.0, 3000.0),
+            _ => (300.0, 2700.0), // usb / lsb / ssb voice
+        }
+    }
+
+    /// Map a HamHawk mode to a valid KiwiSDR DEMODULATION mode. KiwiSDR has no
+    /// "ft8"/"psk31"/etc. demod — the digital lane decodes those from USB audio,
+    /// so they must be demodulated as USB and fed to the in-app decoder. (Sending
+    /// `mod=ft8` is invalid and yields wrong/no audio → the decoder gets nothing.)
+    fn sdr_demod(mode: &str) -> &'static str {
+        match mode {
+            "lsb" => "lsb",
+            "am" | "amn" => "am",
+            "cw" | "cwn" => "cw",
+            // usb voice + all digital modes demod as USB.
+            _ => "usb",
         }
     }
 
@@ -91,6 +108,7 @@ impl KiwiSDR {
         telem_tx: mpsc::Sender<TelemetryFrame>,
         mut on_live: impl FnMut() + Send,
         tune_rx: &mut mpsc::Receiver<u64>,
+        ctl_rx: &mut mpsc::Receiver<RadioCtl>,
     ) -> Result<(), SourceError> {
         let cfg = self
             .config
@@ -112,18 +130,29 @@ impl KiwiSDR {
         let (mut write, mut read) = ws.split();
 
         // --- handshake / configuration ---
-        let freq_khz = cfg.freq_hz as f64 / 1000.0;
+        // These track the LIVE radio state so a retune preserves a custom filter and
+        // a filter change preserves the current freq (each `SET mod=...` carries all
+        // three: mode, passband, freq).
+        let mut cur_freq_khz = cfg.freq_hz as f64 / 1000.0;
         let mode = cfg.mode.to_lowercase();
-        let (low_cut, high_cut) = Self::passband(&mode);
+        // What we send to the SDR (a valid KiwiSDR demod) vs. the HamHawk mode that
+        // selects the in-app decoder. Digital modes demod as USB.
+        let demod = Self::sdr_demod(&mode);
+        let (mut low_cut, mut high_cut) = Self::passband(&mode);
+        let mut agc_on = true;
+        let mut man_gain = 50i32;
+        let agc_line = |on: bool, g: i32| {
+            format!("SET agc={} hang=0 thresh=-100 slope=6 decay=1000 manGain={g}", on as i32)
+        };
 
         let setup = [
             "SET auth t=kiwi p=".to_string(),
             "SET ident_user=HamHawk".to_string(),
             format!("SET AR OK in={AUDIO_RATE} out=48000"),
             format!(
-                "SET mod={mode} low_cut={low_cut} high_cut={high_cut} freq={freq_khz:.2}"
+                "SET mod={demod} low_cut={low_cut} high_cut={high_cut} freq={cur_freq_khz:.2}"
             ),
-            "SET agc=1 hang=0 thresh=-100 slope=6 decay=1000 manGain=50".to_string(),
+            agc_line(agc_on, man_gain),
             "SET compression=1".to_string(),
             "SET squelch=0 max=0".to_string(),
         ];
@@ -153,11 +182,29 @@ impl KiwiSDR {
                 }
                 tuned = tune_rx.recv() => {
                     if let Some(f) = tuned {
-                        // Live retune on the open socket (no reconnect).
-                        let khz = f as f64 / 1000.0;
-                        let (lc, hc) = Self::passband(&mode);
-                        let cmd = format!("SET mod={mode} low_cut={lc} high_cut={hc} freq={khz:.2}");
+                        // Live retune on the open socket (no reconnect). Keep the
+                        // current (possibly customized) passband, don't reset it.
+                        cur_freq_khz = f as f64 / 1000.0;
+                        let cmd = format!("SET mod={demod} low_cut={low_cut} high_cut={high_cut} freq={cur_freq_khz:.2}");
                         if write.send(Message::Text(cmd)).await.is_err() {
+                            break Err(SourceError("connection closed".into()));
+                        }
+                    }
+                }
+                ctl = ctl_rx.recv() => {
+                    if let Some(c) = ctl {
+                        // Live filter / RF-gain change. Apply only the provided fields,
+                        // re-sending the full mod line (carries freq + passband) and the
+                        // AGC line so a partial update can't desync the radio.
+                        if let Some(v) = c.low_cut { low_cut = v; }
+                        if let Some(v) = c.high_cut { high_cut = v; }
+                        if let Some(v) = c.agc { agc_on = v; }
+                        if let Some(v) = c.man_gain { man_gain = v.clamp(0, 120); }
+                        let modcmd = format!("SET mod={demod} low_cut={low_cut} high_cut={high_cut} freq={cur_freq_khz:.2}");
+                        let gaincmd = agc_line(agc_on, man_gain);
+                        if write.send(Message::Text(modcmd)).await.is_err()
+                            || write.send(Message::Text(gaincmd)).await.is_err()
+                        {
                             break Err(SourceError("connection closed".into()));
                         }
                     }
@@ -276,12 +323,16 @@ mod live_tests {
             mode: "am".into(),
             lane: Lane::Voice,
             enabled: true,
+            favorite: false,
+            antenna: None,
+            region: None,
         };
         let (atx, mut arx) = mpsc::channel::<AudioFrame>(256);
         let (ttx, _trx) = mpsc::channel::<TelemetryFrame>(64);
         let (_tune_tx, mut tune_rx) = mpsc::channel::<u64>(8);
+        let (_ctl_tx, mut ctl_rx) = mpsc::channel::<RadioCtl>(8);
         let sdr = KiwiSDR::new(&cfg.url).with_config(cfg);
-        let stream = sdr.stream(atx, ttx, || println!("LIVE: configured, audio expected"), &mut tune_rx);
+        let stream = sdr.stream(atx, ttx, || println!("LIVE: configured, audio expected"), &mut tune_rx, &mut ctl_rx);
         tokio::pin!(stream);
 
         let mut frames = 0usize;

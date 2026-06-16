@@ -16,6 +16,16 @@ export interface ReceiverConfig {
   mode: string;
   lane: Lane;
   enabled: boolean;
+  favorite?: boolean;
+  antenna?: string;
+  region?: string;
+}
+/** Live filter / RF-gain change for a running KiwiSDR (all fields optional). */
+export interface RadioCtl {
+  low_cut?: number;
+  high_cut?: number;
+  agc?: boolean;
+  man_gain?: number;
 }
 export interface TranscriptRow {
   id: number;
@@ -84,6 +94,7 @@ interface AppState {
   paletteOpen: boolean;
   settingsOpen: boolean;
   addOpen: boolean;
+  bestOpen: boolean;
   addKind: Kind;
   editId: string | null;
   search: string;
@@ -94,9 +105,12 @@ interface AppState {
 
   loadAll: () => Promise<void>;
   loadReceivers: () => Promise<void>;
-  addReceiver: (cfg: Omit<ReceiverConfig, "id" | "enabled">, start?: boolean) => Promise<void>;
+  addReceiver: (cfg: Omit<ReceiverConfig, "id" | "enabled" | "favorite">, start?: boolean) => Promise<string>;
   removeReceiver: (id: string) => Promise<void>;
   updateReceiver: (cfg: ReceiverConfig) => Promise<void>;
+  toggleFavorite: (id: string) => Promise<void>;
+  setRadioCtl: (id: string, ctl: RadioCtl) => void;
+  exportLog: (format: "adif" | "csv", digitalOnly: boolean) => Promise<string>;
   setEditId: (id: string | null) => void;
   startReceiver: (id: string) => Promise<boolean>;
   stopReceiver: (id: string) => Promise<void>;
@@ -114,6 +128,7 @@ interface AppState {
   setPaletteOpen: (b: boolean) => void;
   setSettingsOpen: (b: boolean) => void;
   setAddOpen: (b: boolean) => void;
+  setBestOpen: (b: boolean) => void;
   openAdd: (kind?: Kind) => void;
   setSearch: (s: string) => void;
   runSearch: (text: string) => Promise<void>;
@@ -182,6 +197,7 @@ export const useStore = create<AppState>((set, get) => ({
   paletteOpen: false,
   settingsOpen: false,
   addOpen: false,
+  bestOpen: false,
   addKind: "kiwisdr",
   editId: null,
   search: "",
@@ -212,7 +228,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   addReceiver: async (cfg, start = true) => {
     const id = `recv_${Date.now()}`;
-    const full: ReceiverConfig = { ...cfg, id, enabled: true };
+    const full: ReceiverConfig = { ...cfg, id, enabled: true, favorite: false };
     try {
       await invoke("add_receiver", { cfg: full });
       set({ receivers: [...get().receivers, full], activeId: id, addOpen: false });
@@ -223,8 +239,36 @@ export const useStore = create<AppState>((set, get) => ({
         // clicks to "deselect".
         if (ok) await get().setMonitor(id);
       }
+      return id;
     } catch (e) {
       set({ error: String(e) });
+      return "";
+    }
+  },
+
+  toggleFavorite: async (id) => {
+    const r = get().receivers.find((x) => x.id === id);
+    if (!r) return;
+    const favorite = !r.favorite;
+    try {
+      await invoke("set_favorite", { id, favorite });
+      set({ receivers: get().receivers.map((x) => (x.id === id ? { ...x, favorite } : x)) });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  // Fire-and-forget live filter / RF-gain change (best-effort; KiwiSDR only).
+  setRadioCtl: (id, ctl) => {
+    invoke("set_radio_ctl", { id, ctl }).catch((e) => set({ error: String(e) }));
+  },
+
+  exportLog: async (format, digitalOnly) => {
+    try {
+      return await invoke<string>("export_log", { format, digitalOnly });
+    } catch (e) {
+      set({ error: String(e) });
+      return "";
     }
   },
 
@@ -480,6 +524,7 @@ export const useStore = create<AppState>((set, get) => ({
   setPaletteOpen: (b) => set({ paletteOpen: b }),
   setSettingsOpen: (b) => set({ settingsOpen: b }),
   setAddOpen: (b) => set({ addOpen: b }),
+  setBestOpen: (b) => set({ bestOpen: b }),
   openAdd: (kind = "kiwisdr") => set({ addOpen: true, addKind: kind }),
   setSearch: (s) => set({ search: s }),
 
