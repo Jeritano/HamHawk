@@ -18,8 +18,45 @@
   --btn-edge: #3a3d44;
   --label: #9aa3ac;
   --faint: #5d646d;
+  /* text-hierarchy aliases (one source of truth so a palette change cascades) */
+  --text-primary: var(--ink);
+  --text-secondary: var(--label);
+  --text-tertiary: var(--faint);
+  --disabled-opacity: .45;
+  /* spacing rhythm (4/8/12/16/24) so the eye settles into one cadence */
+  --sp-xs: 4px;
+  --sp-sm: 8px;
+  --sp-md: 12px;
+  --sp-lg: 16px;
+  --sp-xl: 24px;
+  /* radii */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  /* depth/elevation tokens (one shadow language across the chassis) */
+  --depth-rest: 0 2px 4px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.05);
+  --depth-hover: 0 6px 14px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.08);
+  --depth-active: inset 0 2px 6px rgba(0,0,0,.7);
+  --depth-glow-teal: 0 0 14px rgba(42,209,182,.45);
+  --depth-bevel-inset: inset 0 1px 0 rgba(255,255,255,.06), inset 0 -1px 0 rgba(0,0,0,.4);
+  --depth-modal: 0 30px 80px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.06);
+  /* motion: one tasteful easing curve */
+  --ease-out: cubic-bezier(.16,.1,.3,1);
+  --t-fast: .12s;
+  --t-base: .2s;
+  --t-modal: .26s;
   --mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+}
+
+/* Rock-solid numerics across the whole rig — every digit/freq/meter/clock keeps
+   a fixed advance so the readout doesn't shift sideways on every tune step. */
+.freq, .freq-sub, .vfo-name, .mem .fr, .mem .mt, .rmem-item .fr, .cat-snr,
+.tag.snr, .tr-time, .ba-row .snr, .ba-row .tm, .lcd-top, .clock,
+.knob-label, .ribbon-row, .list-row .s, code, .map-legend {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
 }
 
 * { box-sizing: border-box; }
@@ -35,7 +72,9 @@ body {
 }
 button { font-family: inherit; color: inherit; cursor: pointer; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #2a2d33; border-radius: 6px; }
+::-webkit-scrollbar-thumb { background: #2a2d33; border-radius: var(--radius-sm); transition: background var(--t-fast) var(--ease-out); }
+::-webkit-scrollbar-thumb:hover { background: #3a3d44; }
+::-webkit-scrollbar-track { background: transparent; }
 
 /* ===== chassis ===== */
 .rig {
@@ -100,10 +139,24 @@ button { font-family: inherit; color: inherit; cursor: pointer; }
 .rigbtn:active { transform: translateY(1px); }
 .rigbtn .k { font-size: 10px; font-weight: 800; letter-spacing: .4px; color: var(--ink); }
 .rigbtn .v { font-size: 9px; color: var(--label); margin-top: 1px; text-transform: uppercase; letter-spacing: .3px; }
-.rigbtn .led { position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: #2a2d33; }
-.rigbtn.on .led { background: var(--green); box-shadow: 0 0 7px var(--green); }
-.rigbtn.on.warn .led { background: var(--amber); box-shadow: 0 0 7px var(--amber); }
-.rigbtn.on.rec .led { background: var(--red); box-shadow: 0 0 7px var(--red); }
+.rigbtn .led {
+  position: absolute; top: 6px; right: 6px; width: 6px; height: 6px;
+  border-radius: 50%; background: #2a2d33;
+  box-shadow: inset 0 1px 1px rgba(0,0,0,.6);
+  transition: background var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+.rigbtn.on .led {
+  background: var(--green);
+  box-shadow: 0 0 4px rgba(70,224,138,.8), 0 0 10px rgba(70,224,138,.5), 0 0 18px rgba(70,224,138,.2), inset 0 1px 1px rgba(255,255,255,.35);
+}
+.rigbtn.on.warn .led {
+  background: var(--amber);
+  box-shadow: 0 0 4px rgba(255,179,64,.8), 0 0 10px rgba(255,179,64,.5), 0 0 18px rgba(255,179,64,.2), inset 0 1px 1px rgba(255,255,255,.35);
+}
+.rigbtn.on.rec .led {
+  background: var(--red);
+  box-shadow: 0 0 4px rgba(255,77,77,.85), 0 0 10px rgba(255,77,77,.55), 0 0 18px rgba(255,77,77,.22), inset 0 1px 1px rgba(255,255,255,.35);
+}
 .rigbtn.power .k { color: var(--green); }
 
 /* split scan button (left = down, right = up) */
@@ -124,8 +177,12 @@ button { font-family: inherit; color: inherit; cursor: pointer; }
     linear-gradient(180deg, rgba(255,255,255,.02), transparent 12%),
     var(--lcd);
   border: 2px solid #000;
-  border-radius: 10px;
-  box-shadow: inset 0 0 0 1px #0d3a30, inset 0 0 40px rgba(0,0,0,.6);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    inset 0 0 0 1px #0d3a30,
+    inset 0 0 40px rgba(0,0,0,.6),
+    inset 0 2px 10px rgba(42,209,182,.08),
+    0 8px 22px rgba(0,0,0,.7);
   overflow: hidden;
 }
 .lcd-top {
@@ -149,9 +206,9 @@ button { font-family: inherit; color: inherit; cursor: pointer; }
 .tag.fil { background: #143; color: var(--green); }
 .vfo-name { font-size: 11px; color: var(--label); margin-left: auto; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
 .freq {
-  font-family: var(--mono); font-weight: 700; color: var(--ink);
-  font-size: clamp(26px, 4.6vw, 52px); line-height: 1; letter-spacing: 1px;
-  text-shadow: 0 0 16px rgba(42,209,182,.18);
+  font-family: var(--mono); font-weight: 800; color: var(--ink);
+  font-size: clamp(28px, 4.6vw, 52px); line-height: 1; letter-spacing: 2px;
+  text-shadow: 0 0 24px rgba(42,209,182,.32), 0 0 4px rgba(233,243,239,.55);
   white-space: nowrap;
 }
 .freq .hz { font-size: .42em; color: var(--teal); }
@@ -263,12 +320,37 @@ button { font-family: inherit; color: inherit; cursor: pointer; }
 .recbtn:disabled { opacity: .45; cursor: not-allowed; }
 .vol { width: 100%; }
 .vol input { width: 100%; }
-.slider { -webkit-appearance: none; appearance: none; height: 4px; border-radius: 3px; background: #0c0d10; outline: none; }
-.slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 13px; height: 13px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 0 3px rgba(42,209,182,.2); }
+.slider {
+  -webkit-appearance: none; appearance: none;
+  height: 5px; border-radius: 3px;
+  background: linear-gradient(180deg, #06080a, #0e1014);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,.8), inset 0 -1px 0 rgba(255,255,255,.04);
+  outline: none;
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 32%, #6be1d2 0%, #2ad1b6 45%, #15a890 100%);
+  box-shadow:
+    0 2px 4px rgba(0,0,0,.55),
+    inset 0 1px 1.5px rgba(255,255,255,.4),
+    inset 0 -2px 3px rgba(0,0,0,.35),
+    0 0 0 3px rgba(42,209,182,.18);
+  transition: transform var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+.slider::-webkit-slider-thumb:hover { transform: scale(1.12); }
+.slider:active::-webkit-slider-thumb {
+  box-shadow:
+    0 1px 2px rgba(0,0,0,.5),
+    inset 0 1px 1.5px rgba(255,255,255,.5),
+    0 0 0 4px rgba(42,209,182,.28);
+}
 
 /* ===== overlays (modals / palette) ===== */
-.overlay { position: fixed; inset: 0; background: rgba(2,4,3,.66); backdrop-filter: blur(3px); display: grid; z-index: 50; }
-.modal, .palette { width: 480px; max-width: 92vw; margin: auto; background: var(--chassis); border: 1px solid #000; border-radius: 12px; box-shadow: 0 30px 80px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.05); }
+.overlay { position: fixed; inset: 0; background: rgba(2,4,3,.66); backdrop-filter: blur(3px); display: grid; z-index: 50; animation: overlayIn var(--t-modal) var(--ease-out); }
+.modal, .palette { width: 480px; max-width: 92vw; margin: auto; background: var(--chassis); border: 1px solid #000; border-radius: var(--radius-lg); box-shadow: var(--depth-modal); animation: modalIn var(--t-modal) var(--ease-out); }
+@keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modalIn { from { opacity: 0; transform: scale(.96) translateY(-16px); } to { opacity: 1; transform: none; } }
 .palette { margin: 12vh auto auto; align-self: start; overflow: hidden; }
 .palette input { width: 100%; border: 0; background: transparent; color: var(--ink); font-size: 16px; padding: 15px 18px; outline: none; border-bottom: 1px solid #000; }
 .palette .items { max-height: 50vh; overflow-y: auto; padding: 6px; }
@@ -280,8 +362,14 @@ button { font-family: inherit; color: inherit; cursor: pointer; }
 .modal .body { padding: 18px; display: flex; flex-direction: column; gap: 13px; max-height: 70vh; overflow-y: auto; }
 .modal .foot { padding: 14px 18px; border-top: 1px solid #000; display: flex; justify-content: flex-end; gap: 8px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.input, select.input { width: 100%; background: var(--bezel); border: 1px solid #000; color: var(--ink); border-radius: 7px; padding: 8px 10px; font-size: 13px; outline: none; }
-.input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(42,209,182,.15); }
+.input, select.input {
+  width: 100%; background: var(--bezel); color: var(--ink);
+  border: 1px solid rgba(0,0,0,.55); border-top-color: rgba(255,255,255,.08);
+  border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; outline: none;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.4);
+  transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+.input:focus { border-color: var(--teal); box-shadow: inset 0 1px 2px rgba(0,0,0,.4), 0 0 0 3px rgba(42,209,182,.18); }
 label.fld { display: block; font-size: 11px; color: var(--label); margin: 0 0 4px; text-transform: uppercase; letter-spacing: .4px; }
 .btn { display: inline-flex; align-items: center; gap: 6px; justify-content: center; background: var(--btn-2); border: 1px solid #000; color: var(--ink); border-radius: 7px; padding: 7px 12px; font-size: 12.5px; font-weight: 600; }
 .btn:hover { filter: brightness(1.12); }
@@ -323,7 +411,6 @@ label.fld { display: block; font-size: 11px; color: var(--label); margin: 0 0 4p
     linear-gradient(180deg, transparent 88%, rgba(0,0,0,.22));
   opacity: .55;
 }
-.freq { text-shadow: 0 0 18px rgba(42,209,182,.28), 0 0 2px rgba(233,243,239,.45); }
 .knob { box-shadow: 0 8px 18px rgba(0,0,0,.65), inset 0 2px 5px rgba(255,255,255,.08), inset 0 -6px 14px rgba(0,0,0,.7), 0 0 0 1px #000; }
 .knob.tune { background: radial-gradient(circle at 40% 33%, #50545c 0%, #2b2e34 36%, #15171b 68%, #0a0b0e 100%); }
 .knob.tune::before { background: radial-gradient(circle at 42% 36%, #3a3d44, #0e1014); box-shadow: inset 0 2px 6px rgba(0,0,0,.7); }
@@ -460,3 +547,33 @@ label.fld { display: block; font-size: 11px; color: var(--label); margin: 0 0 4p
 .model-status.no { color: var(--amber); border: 1px solid var(--amber); }
 .model-dl-bar { height: 6px; border-radius: 4px; background: #0c0d10; overflow: hidden; margin-top: 6px; }
 .model-dl-bar > div { height: 100%; background: var(--teal); transition: width .2s; }
+
+/* ===== keyboard focus rings (a11y + polish; pseudo-elements get box-shadow) ===== */
+.rigbtn:focus-visible, .softkey:focus-visible, .btn:focus-visible,
+.rmem-item:focus-visible, .lband:focus-visible, .scan-half:focus-visible,
+.cat-row button:focus-visible, .ribbon-row:focus-visible, .fav-star:focus-visible,
+.vfo-clear:focus-visible, .agcbtn:focus-visible, .palette .item:focus-visible {
+  outline: 2px solid var(--teal); outline-offset: 2px;
+}
+.slider:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--teal), 0 0 0 7px rgba(42,209,182,.22); }
+
+/* ===== smooth hover transitions on list rows (no more snap) ===== */
+.mem, .rmem-item, .lband, .list-row, .palette .item, .ribbon-row, .cat-row {
+  transition: filter var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out);
+}
+
+/* ===== softkey adds an active state matching .rigbtn ===== */
+.softkey { transition: filter var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out); }
+.softkey:active { box-shadow: var(--depth-active); transform: translateY(.5px); }
+
+/* ===== unified disabled treatment ===== */
+.btn[disabled], .scan-half:disabled, .recbtn:disabled, .rigbtn[disabled] { opacity: var(--disabled-opacity); cursor: not-allowed; filter: none !important; }
+
+/* ===== toast slide-in (was no transition at all) ===== */
+.toast { animation: toastIn .26s var(--ease-out); }
+@keyframes toastIn { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
+
+/* ===== reduced motion respect (taste + a11y) ===== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}

@@ -1,11 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore, type ReceiverConfig } from "../state/store";
 import { Waterfall } from "./Waterfall";
 import { SpectrumTrace } from "./SpectrumTrace";
 import { AudioScope } from "./AudioScope";
 import { SMeterArc } from "./SMeterArc";
-import { WorldMap, type MapPoint } from "./WorldMap";
+import type { MapPoint } from "./WorldMap";
+// WorldMap pulls in worldcountries.ts (~127 KB minified, ~36% of the JS bundle).
+// Lazy-loading it keeps that geometry out of the boot path — fetched only when
+// the user opens MAP for the first time.
+const WorldMap = lazy(() => import("./WorldMap").then((m) => ({ default: m.WorldMap })));
 import { LeftBands } from "./LeftBands";
 import { extractGrid, gridToLatLon } from "../lib/maidenhead";
 import { formatFreq, formatTimeHMS } from "../lib/format";
@@ -634,7 +638,10 @@ function ScopeView({ main, sub }: { main: ReceiverConfig | null; sub: ReceiverCo
 
 function TextView({ rx }: { rx: ReceiverConfig | null }) {
   const transcripts = useStore((s) => s.transcripts);
-  const rows = rx ? transcripts.filter((t) => t.receiver_id === rx.id) : [];
+  const rows = useMemo(
+    () => (rx ? transcripts.filter((t) => t.receiver_id === rx.id) : []),
+    [transcripts, rx?.id],
+  );
   if (!rx || rows.length === 0)
     return <div className="lcd-empty"><div>{rx ? "No decodes yet." : "No VFO."}</div></div>;
   return (
@@ -675,7 +682,9 @@ function MapView() {
   }, [transcripts]);
   return (
     <div className="lcd-data">
-      <WorldMap points={points} />
+      <Suspense fallback={<div className="lcd-empty"><div>Loading map…</div></div>}>
+        <WorldMap points={points} />
+      </Suspense>
       <div className="map-legend">{points.length} station(s) located from decoded grid squares.</div>
     </div>
   );
@@ -683,7 +692,10 @@ function MapView() {
 
 function ActivityView() {
   const transcripts = useStore((s) => s.transcripts);
-  const digital = transcripts.filter((t) => t.lane === "digital").slice(0, 80);
+  const digital = useMemo(
+    () => transcripts.filter((t) => t.lane === "digital").slice(0, 80),
+    [transcripts],
+  );
   if (digital.length === 0) return <div className="lcd-empty"><div>No digital decodes yet.</div></div>;
   return (
     <div className="lcd-data">
@@ -703,7 +715,13 @@ function LogView() {
   const exportLog = useStore((s) => s.exportLog);
   const [busy, setBusy] = useState(false);
   const [last, setLast] = useState("");
-  const rows = transcripts.slice(0, 200);
+  const rows = useMemo(() => transcripts.slice(0, 200), [transcripts]);
+  // Enrich once per render so each row's regex (callsign + grid) doesn't run
+  // again on unrelated re-renders or per-keystroke.
+  const enriched = useMemo(
+    () => rows.map((t) => ({ row: t, call: findCall(t.text_en), grid: extractGrid(t.text_en) })),
+    [rows],
+  );
   const doExport = async (fmt: "adif" | "csv") => {
     setBusy(true);
     // ADIF carries callsigns/grids → digital lane only; CSV exports everything.
@@ -737,25 +755,21 @@ function LogView() {
           No decodes or transcripts logged yet. Run a digital (FT8/CW) or voice receiver.
         </div>
       )}
-      {rows.map((t) => {
-        const call = findCall(t.text_en);
-        const grid = extractGrid(t.text_en);
-        return (
-          <div className="list-row" key={t.id + "-" + t.ts_start}>
-            <div className="main">
-              <div className="t" style={{ whiteSpace: "normal" }}>
-                {call && <span style={{ color: "var(--teal)", fontWeight: 700 }}>{call} </span>}
-                {grid && <span className="faint">{grid} </span>}
-                <span style={{ fontWeight: 400 }}>{t.text_en}</span>
-              </div>
-              <div className="s">
-                {formatTimeHMS(t.ts_start)} · {t.mode.toUpperCase()} · {t.lane}
-                {t.snr_db != null ? ` · ${t.snr_db.toFixed(0)}dB` : ""}
-              </div>
+      {enriched.map(({ row: t, call, grid }) => (
+        <div className="list-row" key={t.id + "-" + t.ts_start}>
+          <div className="main">
+            <div className="t" style={{ whiteSpace: "normal" }}>
+              {call && <span style={{ color: "var(--teal)", fontWeight: 700 }}>{call} </span>}
+              {grid && <span className="faint">{grid} </span>}
+              <span style={{ fontWeight: 400 }}>{t.text_en}</span>
+            </div>
+            <div className="s">
+              {formatTimeHMS(t.ts_start)} · {t.mode.toUpperCase()} · {t.lane}
+              {t.snr_db != null ? ` · ${t.snr_db.toFixed(0)}dB` : ""}
             </div>
           </div>
-        );
-      })}
+        </div>
+      ))}
     </div>
   );
 }

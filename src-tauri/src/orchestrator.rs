@@ -33,6 +33,9 @@ struct Session {
     tune_tx: mpsc::Sender<u64>,
     /// Live filter / RF-gain control channel (KiwiSDR; no reconnect).
     ctl_tx: mpsc::Sender<crate::model::RadioCtl>,
+    /// Last-applied control snapshot — re-applied on every reconnect so the
+    /// user's filter/AGC/manual gain doesn't silently vanish on a network drop.
+    last_ctl: Arc<Mutex<Option<crate::model::RadioCtl>>>,
     /// Cancels detached work (feed HTTP thread + decoder) that abort can't reach.
     cancel: Arc<AtomicBool>,
 }
@@ -49,7 +52,22 @@ impl Drop for Session {
     }
 }
 
-type Alerts = Arc<Mutex<Vec<AlertRule>>>;
+/// Alert rule + a precomputed lowercase pattern. Stops the per-transcript
+/// .to_lowercase() string alloc loop in check_alerts; with N rules and a busy
+/// FT8 channel that was ~N alloc/sec for nothing.
+struct CachedRule {
+    rule: AlertRule,
+    pattern_lc: String,
+}
+type Alerts = Arc<Mutex<Vec<CachedRule>>>;
+
+fn cache_rules(rules: Vec<AlertRule>) -> Vec<CachedRule> {
+    rules
+        .into_iter()
+        .filter(|r| r.enabled && !r.pattern.is_empty())
+        .map(|r| CachedRule { pattern_lc: r.pattern.to_lowercase(), rule: r })
+        .collect()
+}
 type Modes = Arc<Mutex<HashMap<String, String>>>;
 
 /// The single shared ASR pool: the job sender plus the worker-pool + result-
@@ -89,7 +107,7 @@ pub struct Orchestrator {
 impl Orchestrator {
     pub fn new(db: Db, app: AppHandle) -> Self {
         let db = Arc::new(db);
-        let alerts = Arc::new(Mutex::new(load_alert_rules(&db)));
+        let alerts = Arc::new(Mutex::new(cache_rules(load_alert_rules(&db))));
         Self {
             db,
             app,
@@ -209,18 +227,20 @@ impl Orchestrator {
         let (digital_tx, digital_rx) = mpsc::channel::<Vec<crate::digital::DigitalMsg>>(64);
         let (tune_tx, tune_rx) = mpsc::channel::<u64>(8);
         let (ctl_tx, ctl_rx) = mpsc::channel::<crate::model::RadioCtl>(8);
+        let last_ctl: Arc<Mutex<Option<crate::model::RadioCtl>>> = Arc::new(Mutex::new(None));
         let cancel = Arc::new(AtomicBool::new(false));
 
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
-        // 1. Source (connect + reconnect/backoff + live retune).
+        // 1. Source (connect + reconnect/backoff + live retune + re-apply last ctl).
         {
             let app = self.app.clone();
             let cfg = cfg.clone();
             let id = id.to_string();
             let db = self.db.clone();
             let cancel = cancel.clone();
-            tasks.push(spawn(source_loop(cfg, id, app, raw_tx, telem_tx, tune_rx, ctl_rx, db, cancel)));
+            let last_ctl = last_ctl.clone();
+            tasks.push(spawn(source_loop(cfg, id, app, raw_tx, telem_tx, tune_rx, ctl_rx, last_ctl, db, cancel)));
         }
 
         // 2. Tap: spectrum (waterfall) + monitored audio + recording, then forward.
@@ -298,7 +318,7 @@ impl Orchestrator {
         }
         // `tap` is dropped here (not stored) → detached; it self-terminates when
         // the source closes.
-        sessions.insert(id.to_string(), Session { tasks, tune_tx, ctl_tx, cancel });
+        sessions.insert(id.to_string(), Session { tasks, tune_tx, ctl_tx, last_ctl, cancel });
         Ok(())
     }
 
@@ -318,6 +338,21 @@ impl Orchestrator {
     /// no-op if the receiver isn't running or the source ignores control messages.
     pub fn set_radio_ctl(&self, id: &str, ctl: crate::model::RadioCtl) -> Result<(), String> {
         if let Some(sess) = self.sessions.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
+            // Snapshot the new merged state BEFORE forwarding, so a reconnect that
+            // happens mid-flight re-applies the same values the user just set.
+            {
+                let mut slot = sess.last_ctl.lock().unwrap_or_else(|e| e.into_inner());
+                let merged = match slot.clone() {
+                    Some(prev) => crate::model::RadioCtl {
+                        low_cut: ctl.low_cut.or(prev.low_cut),
+                        high_cut: ctl.high_cut.or(prev.high_cut),
+                        agc: ctl.agc.or(prev.agc),
+                        man_gain: ctl.man_gain.or(prev.man_gain),
+                    },
+                    None => ctl.clone(),
+                };
+                *slot = Some(merged);
+            }
             let _ = sess.ctl_tx.try_send(ctl);
         }
         Ok(())
@@ -492,7 +527,7 @@ impl Orchestrator {
         self.db
             .add_alert_rule(&rule.id, &rule.name, &rule.pattern, rule.enabled)
             .map_err(|e| e.to_string())?;
-        *self.alerts.lock().unwrap_or_else(|e| e.into_inner()) = load_alert_rules(&self.db);
+        *self.alerts.lock().unwrap_or_else(|e| e.into_inner()) = cache_rules(load_alert_rules(&self.db));
         Ok(())
     }
 
@@ -506,7 +541,7 @@ impl Orchestrator {
 
     pub fn remove_alert_rule(&self, id: &str) -> Result<(), String> {
         self.db.remove_alert_rule(id).map_err(|e| e.to_string())?;
-        *self.alerts.lock().unwrap_or_else(|e| e.into_inner()) = load_alert_rules(&self.db);
+        *self.alerts.lock().unwrap_or_else(|e| e.into_inner()) = cache_rules(load_alert_rules(&self.db));
         Ok(())
     }
 
@@ -807,7 +842,9 @@ fn export_csv(rows: &[TranscriptRow], meta: &HashMap<String, (u64, String)>) -> 
             if freq_hz > 0 { format!("{:.6}", freq_hz as f64 / 1e6) } else { String::new() },
             t.mode.clone(),
             lane.to_string(),
-            t.snr_db.map(|s| format!("{:.0}", s)).unwrap_or_default(),
+            // Distinguish "not measured" from a real 0 dB so readers can tell them
+            // apart (most lanes don't report SNR at all — voice/CW/PSK/RTTY).
+            t.snr_db.map(|s| format!("{:.0}", s)).unwrap_or_else(|| "N/A".into()),
             find_callsign(&t.text_en).unwrap_or_default(),
             find_grid(&t.text_en).unwrap_or_default(),
             t.text_en.trim().to_string(),
@@ -837,6 +874,7 @@ async fn source_loop(
     telem_tx: mpsc::Sender<SourceTelemetry>,
     mut tune_rx: mpsc::Receiver<u64>,
     mut ctl_rx: mpsc::Receiver<crate::model::RadioCtl>,
+    last_ctl: Arc<Mutex<Option<crate::model::RadioCtl>>>,
     db: Arc<Db>,
     cancel: Arc<AtomicBool>,
 ) {
@@ -849,6 +887,10 @@ async fn source_loop(
         if let Some(f) = db.get_receiver_freq(&id) {
             cfg.freq_hz = f;
         }
+        // Snapshot of the user's last filter/RF-gain. Re-applied on every reconnect
+        // so a network drop doesn't silently revert the sliders. Passed into the
+        // adapter as an "initial control" so it lands right after handshake.
+        let initial_ctl = last_ctl.lock().unwrap_or_else(|e| e.into_inner()).clone();
         events::emit_session(&app, &id, SessionStatus::Connecting, None);
         let started = Instant::now();
         let result = match cfg.kind {
@@ -863,6 +905,7 @@ async fn source_loop(
                         move || events::emit_session(&app2, &id2, SessionStatus::Live, None),
                         &mut tune_rx,
                         &mut ctl_rx,
+                        initial_ctl.clone(),
                     )
                     .await
             }
@@ -1103,15 +1146,17 @@ fn open_wav(dir: &str, name: &str, sample_rate: u32) -> Option<hound::WavWriter<
 
 fn check_alerts(text: &str, id: &str, ts: i64, alerts: &Alerts, db: &Arc<Db>, app: &AppHandle) {
     let lc = text.to_lowercase();
-    let rules = alerts.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    for r in rules.iter().filter(|r| r.enabled && !r.pattern.is_empty()) {
-        if lc.contains(&r.pattern.to_lowercase()) {
-            let _ = db.insert_alert_hit(&r.id, &r.name, id, ts, text);
+    // Hold the lock only for the iteration — no per-call Vec clone, no per-rule
+    // .to_lowercase() (patterns are precomputed in `pattern_lc`).
+    let cached = alerts.lock().unwrap_or_else(|e| e.into_inner());
+    for c in cached.iter() {
+        if lc.contains(&c.pattern_lc) {
+            let _ = db.insert_alert_hit(&c.rule.id, &c.rule.name, id, ts, text);
             events::emit_alert(
                 app,
                 AlertHit {
-                    rule_id: r.id.clone(),
-                    rule_name: r.name.clone(),
+                    rule_id: c.rule.id.clone(),
+                    rule_name: c.rule.name.clone(),
                     receiver_id: id.to_string(),
                     ts_ms: ts,
                     text: text.to_string(),
@@ -1458,5 +1503,18 @@ mod tests {
         assert!(lines[1].contains("K1ABC"));
         assert!(lines[1].contains("FN42"));
         assert!(lines[1].contains("14.074000"));
+        // With snr_db = Some(-7.0) the SNR column is the rounded number, not N/A.
+        assert!(lines[1].contains(",-7,"));
+    }
+
+    #[test]
+    fn csv_distinguishes_missing_snr_from_zero() {
+        // A row with snr_db = None must render "N/A" so readers can tell
+        // "not measured" from a real 0 dB reading.
+        let mut t = drow("CQ K1ABC FN42");
+        t.snr_db = None;
+        let meta = HashMap::new();
+        let s = export_csv(&[t], &meta);
+        assert!(s.lines().nth(1).unwrap().contains(",N/A,"));
     }
 }

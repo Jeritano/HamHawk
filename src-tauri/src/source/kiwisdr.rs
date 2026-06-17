@@ -96,6 +96,9 @@ impl KiwiSDR {
         mut on_live: impl FnMut() + Send,
         tune_rx: &mut mpsc::Receiver<u64>,
         ctl_rx: &mut mpsc::Receiver<RadioCtl>,
+        // Last user-applied filter/RF-gain to re-apply after handshake (so a
+        // reconnect doesn't silently revert the sliders).
+        initial_ctl: Option<RadioCtl>,
     ) -> Result<(), SourceError> {
         let cfg = self
             .config
@@ -128,6 +131,14 @@ impl KiwiSDR {
         let (mut low_cut, mut high_cut) = Self::passband(&mode);
         let mut agc_on = true;
         let mut man_gain = 50i32;
+        // Seed initial radio state from the snapshot the orchestrator passed in
+        // (preserved across reconnects). Only fields the user actually set.
+        if let Some(c) = &initial_ctl {
+            if let Some(v) = c.low_cut { low_cut = v; }
+            if let Some(v) = c.high_cut { high_cut = v; }
+            if let Some(v) = c.agc { agc_on = v; }
+            if let Some(v) = c.man_gain { man_gain = v.clamp(0, 120); }
+        }
         let agc_line = |on: bool, g: i32| {
             format!("SET agc={} hang=0 thresh=-100 slope=6 decay=1000 manGain={g}", on as i32)
         };
@@ -319,7 +330,7 @@ mod live_tests {
         let (_tune_tx, mut tune_rx) = mpsc::channel::<u64>(8);
         let (_ctl_tx, mut ctl_rx) = mpsc::channel::<RadioCtl>(8);
         let sdr = KiwiSDR::new(&cfg.url).with_config(cfg);
-        let stream = sdr.stream(atx, ttx, || println!("LIVE: configured, audio expected"), &mut tune_rx, &mut ctl_rx);
+        let stream = sdr.stream(atx, ttx, || println!("LIVE: configured, audio expected"), &mut tune_rx, &mut ctl_rx, None);
         tokio::pin!(stream);
 
         let mut frames = 0usize;
