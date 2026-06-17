@@ -164,8 +164,8 @@ The chosen node is added to Memory (with its antenna noted) and starts listening
 - **REC** (round button on the lower-right of the MAIN TUNING knob) — latches in/out to record MAIN to a WAV file. See [Recording](#8-recording).
 - **AF / VOLUME** — playback loudness.
 - **SQUELCH** — the dBm threshold the scanner uses to decide a frequency is "busy."
-- **FILTER** *(KiwiSDR)* — receiver passband width. Narrow to cut adjacent-channel noise, widen for fidelity. Applied live (no reconnect) and preserved across retunes.
-- **RF GAIN / AGC** *(KiwiSDR)* — leftmost = **AGC** (automatic); raise for manual RF gain. The **AGC** button snaps back to automatic.
+- **FILTER** *(KiwiSDR)* — receiver passband width. Narrow to cut adjacent-channel noise, widen for fidelity. Applied live (no reconnect) and preserved across retunes **and reconnects** (a network drop won't silently revert your filter).
+- **RF GAIN / AGC** *(KiwiSDR)* — leftmost = **AGC** (automatic); raise for manual RF gain. The **AGC** button snaps back to automatic. Also re-applied on every reconnect.
 
 Feeds (scanner streams) aren't tunable, and FILTER / RF GAIN apply only to KiwiSDR VFOs.
 

@@ -32,7 +32,19 @@
   alerts, a world map of decoded grids, a ⌘K command palette, and a scrollable band browser.
 
 > Nothing is faked — every decoder and meter shows real data or nothing at all. Sources that report no
-> signal level show "no meter" rather than a fake zero; SNR appears only when it's real.
+> signal level show "no meter" rather than a fake zero; SNR appears only when it's real. Filter / RF-gain
+> settings survive a network drop (the snapshot is re-applied on every reconnect).
+
+## Design system
+
+The chassis is built on a small set of tokens so the geometry stays cohesive:
+
+- **Spacing rhythm** — `--sp-xs/sm/md/lg/xl` (4 / 8 / 12 / 16 / 24 px)
+- **Radii** — `--radius-sm/md/lg/xl` (6 / 8 / 12 / 16 px)
+- **Elevation** — `--depth-rest/hover/active/glow-teal/bevel-inset/modal` shadow tokens
+- **Motion** — one easing curve (`--ease-out`) + `--t-fast/base/modal` durations
+- **Numerics** — every digit/freq/meter/clock uses `font-variant-numeric: tabular-nums` so the readout doesn't shift on tune
+- **Focus** — `:focus-visible` rings on every interactive element (a11y); `prefers-reduced-motion` honored
 
 📖 **[User's Manual](USER_MANUAL.md)** — full guide to the rig: dual receive, tuning, scanning, decoders, recording, and more.
 
